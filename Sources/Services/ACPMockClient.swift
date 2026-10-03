@@ -6,7 +6,8 @@ public final class ACPMockClient: ACPTransport, @unchecked Sendable {
     private var messageContinuation: AsyncStream<Data>.Continuation?
     private var stderrContinuation: AsyncStream<String>.Continuation?
     private var _isRunning: Bool = false
-    private var activeTurnTask: Task<Void, Never>?
+    private var activeTurnTasks: [String: Task<Void, Never>] = [:]
+    private var activeTurnTokens: [String: UUID] = [:]
 
     public var isRunning: Bool {
         lock.withLock { _isRunning }
@@ -42,15 +43,16 @@ public final class ACPMockClient: ACPTransport, @unchecked Sendable {
     }
 
     public func stop() async {
-        let task = lock.withLock { () -> Task<Void, Never>? in
+        let tasks = lock.withLock { () -> [Task<Void, Never>] in
             _isRunning = false
-            let t = activeTurnTask
-            activeTurnTask = nil
+            let tasks = Array(activeTurnTasks.values)
+            activeTurnTasks.removeAll()
+            activeTurnTokens.removeAll()
             messageContinuation?.finish()
             stderrContinuation?.finish()
-            return t
+            return tasks
         }
-        task?.cancel()
+        tasks.forEach { $0.cancel() }
     }
 
     public func send(data: Data) async throws {
@@ -76,11 +78,16 @@ public final class ACPMockClient: ACPTransport, @unchecked Sendable {
             """
             yieldString(resp)
 
+        case "session/load":
+            let resp = """
+            {"jsonrpc":"2.0","id":"\(reqId)","result":{"sessionId":"\(raw.params?.dictionaryValue?["sessionId"]?.stringValue ?? "")"}}
+            """
+            yieldString(resp)
+
         case "session/cancel":
-            lock.withLock {
-                activeTurnTask?.cancel()
-                activeTurnTask = nil
-            }
+            let serverSessionId = raw.params?.dictionaryValue?["sessionId"]?.stringValue ?? ""
+            let task = lock.withLock { activeTurnTasks.removeValue(forKey: serverSessionId) }
+            task?.cancel()
             let resp = """
             {"jsonrpc":"2.0","id":"\(reqId)","result":true}
             """
@@ -92,8 +99,10 @@ public final class ACPMockClient: ACPTransport, @unchecked Sendable {
             """
             yieldString(resp)
 
+            let params = raw.params?.dictionaryValue
             let userPromptText = extractPromptText(from: raw.params)
-            startSimulatedAgentTurn(userPrompt: userPromptText)
+            let serverSessionId = params?["sessionId"]?.stringValue ?? "mock-session"
+            startSimulatedAgentTurn(userPrompt: userPromptText, sessionId: serverSessionId)
 
         default:
             let resp = """
@@ -117,8 +126,15 @@ public final class ACPMockClient: ACPTransport, @unchecked Sendable {
         return "Task"
     }
 
-    private func yieldString(_ str: String) {
-        if let d = str.data(using: .utf8) {
+    private func yieldString(_ str: String, sessionId: String? = nil) {
+        var output = str
+        if let sessionId, str.contains("\"method\":\"session/update\"") {
+            output = str.replacingOccurrences(
+                of: "\"params\":{",
+                with: "\"params\":{\"sessionId\":\"\(sessionId)\","
+            )
+        }
+        if let d = output.data(using: .utf8) {
             _ = lock.withLock {
                 messageContinuation?.yield(d)
             }
@@ -127,18 +143,28 @@ public final class ACPMockClient: ACPTransport, @unchecked Sendable {
 
     // MARK: - Realistic Agent Turn Simulation
 
-    private func startSimulatedAgentTurn(userPrompt: String) {
+    private func startSimulatedAgentTurn(userPrompt: String, sessionId: String) {
+        let token = UUID()
         lock.withLock {
-            activeTurnTask?.cancel()
+            activeTurnTasks.removeValue(forKey: sessionId)?.cancel()
+            activeTurnTokens[sessionId] = token
         }
 
         let task = Task.detached { [weak self] in
             guard let self = self else { return }
+            defer {
+                self.lock.withLock {
+                    if self.activeTurnTokens[sessionId] == token {
+                        self.activeTurnTasks.removeValue(forKey: sessionId)
+                        self.activeTurnTokens.removeValue(forKey: sessionId)
+                    }
+                }
+            }
 
             // 1. Thinking phase with incremental thoughts
             self.yieldString("""
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"thinking_start"}}
-            """)
+            """, sessionId: sessionId)
 
             let thoughts = [
                 "Analyzing request and inspecting project architecture...",
@@ -153,49 +179,49 @@ public final class ACPMockClient: ACPTransport, @unchecked Sendable {
                 let escaped = chunk.replacingOccurrences(of: "\"", with: "\\\"")
                 self.yieldString("""
                 {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"thinking_chunk","content":"\(escaped)"}}
-                """)
+                """, sessionId: sessionId)
             }
 
             try? await Task.sleep(nanoseconds: 350_000_000)
             self.yieldString("""
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"thinking_end"}}
-            """)
+            """, sessionId: sessionId)
 
             // 2. Structured Plan update
             let planJson = """
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"plan","plan":{"steps":[{"stepId":"1","title":"Analyze project workspace and configuration","status":"completed"},{"stepId":"2","title":"Execute terminal command to verify dependencies","status":"in_progress"},{"stepId":"3","title":"Perform code generation and verify output","status":"pending"}]}}}
             """
-            self.yieldString(planJson)
+            self.yieldString(planJson, sessionId: sessionId)
 
             // 3. Tool Call 1: Terminal bash inspection
             try? await Task.sleep(nanoseconds: 400_000_000)
             let tool1Id = "call_\(UUID().uuidString.prefix(6))"
             self.yieldString("""
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"tool_call","toolCall":{"toolCallId":"\(tool1Id)","title":"Run bash command","kind":"bash","status":"running","input":{"command":"agy --version && git status --short"}}}}
-            """)
+            """, sessionId: sessionId)
 
             try? await Task.sleep(nanoseconds: 700_000_000)
             self.yieldString("""
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"tool_call_update","toolCall":{"toolCallId":"\(tool1Id)","status":"completed","output":{"stdout":"1.2.12\\n M Package.swift\\n?? Sources/UI/ThinkingView.swift"}}}}
-            """)
+            """, sessionId: sessionId)
 
             // 4. Tool Call 2: File reading / grep
             try? await Task.sleep(nanoseconds: 300_000_000)
             let tool2Id = "call_\(UUID().uuidString.prefix(6))"
             self.yieldString("""
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"tool_call","toolCall":{"toolCallId":"\(tool2Id)","title":"Inspect workspace configuration","kind":"search","status":"running","input":{"path":"Sources/AntigravityApp.swift","pattern":"struct AntigravityApp"}}}}
-            """)
+            """, sessionId: sessionId)
 
             try? await Task.sleep(nanoseconds: 500_000_000)
             self.yieldString("""
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"tool_call_update","toolCall":{"toolCallId":"\(tool2Id)","status":"completed","output":{"matches":["@main struct AntigravityApp: App"]}}}}
-            """)
+            """, sessionId: sessionId)
 
             // 5. Update Plan: Mark all completed
             let planComplete = """
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"plan","plan":{"steps":[{"stepId":"1","title":"Analyze project workspace and configuration","status":"completed"},{"stepId":"2","title":"Execute terminal command to verify dependencies","status":"completed"},{"stepId":"3","title":"Perform code generation and verify output","status":"completed"}]}}}
             """
-            self.yieldString(planComplete)
+            self.yieldString(planComplete, sessionId: sessionId)
 
             // 6. Stream final response text
             let responseMarkdown = """
@@ -223,18 +249,20 @@ public final class ACPMockClient: ACPTransport, @unchecked Sendable {
                     .replacingOccurrences(of: "\"", with: "\\\"")
                 self.yieldString("""
                 {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"text_chunk","content":"\(escaped)\\n"}}
-                """)
+                """, sessionId: sessionId)
             }
 
             // 7. Finish turn
             try? await Task.sleep(nanoseconds: 100_000_000)
             self.yieldString("""
             {"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"turn_completed"}}
-            """)
+            """, sessionId: sessionId)
         }
 
         lock.withLock {
-            self.activeTurnTask = task
+            if activeTurnTokens[sessionId] == token {
+                activeTurnTasks[sessionId] = task
+            }
         }
     }
 }

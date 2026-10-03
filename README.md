@@ -1,6 +1,8 @@
-# Antigravity Codex — Native macOS Client
+# Antide — Native macOS Client
 
-A high-performance, native macOS application written in **Swift & SwiftUI** that serves as an interactive GUI client for [`refined-antigravity-acp`](https://github.com/simonepri/refined-antigravity-acp) and Google DeepMind's `agy` CLI autonomous agent protocol.
+![Antide app icon on a white background](Resources/Antide.iconset/icon_512x512.png)
+
+A native macOS application written in **Swift & SwiftUI** that serves as an interactive GUI client for [`refined-antigravity-acp`](https://github.com/simonepri/refined-antigravity-acp) and Google DeepMind's `agy` CLI autonomous agent protocol. The app icon is stored in `Resources/Antide.icns`; its multi-resolution PNG source files are in `Resources/Antide.iconset/`. The packaging script installs it into the app bundle and sets it as Antide's macOS icon.
 
 Heavily inspired by the **Codex** application UI, it provides a dark slate aesthetic, shimmering thinking states, live step-by-step autonomous execution plans, and collapsible tool-call inspection cards.
 
@@ -103,6 +105,9 @@ Open Preferences with `Cmd+,` or by clicking the gear icon in the sidebar:
 agy-native-app/
 ├── Package.swift                  # Swift Package definition
 ├── README.md                      # Documentation
+├── Resources/
+│   ├── Antide.icns                # White-background macOS app icon
+│   └── Antide.iconset/            # Multi-resolution PNG icon assets
 ├── Scripts/
 │   ├── build-app.sh               # Native .app packaging script
 │   └── bundle-acp.sh              # Staging script for Contents/Resources/bin

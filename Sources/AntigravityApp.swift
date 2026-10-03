@@ -6,14 +6,15 @@ struct AntigravityApp: App {
 
     var body: some Scene {
         WindowGroup {
-            NavigationSplitView {
+            HStack(spacing: 0) {
                 SidebarView(viewModel: viewModel)
-            } detail: {
                 ChatView(viewModel: viewModel)
             }
             .preferredColorScheme(.dark)
             .background(CodexTheme.background)
-            .frame(minWidth: 900, minHeight: 600)
+            .navigationTitle("Antide")
+            .frame(minWidth: 1120, minHeight: 700)
+            .onDisappear { viewModel.flushArchive() }
         }
         .windowStyle(.titleBar)
         .commands {
@@ -24,7 +25,7 @@ struct AntigravityApp: App {
                 .keyboardShortcut("n", modifiers: .command)
             }
 
-            CommandMenu("Antigravity") {
+            CommandMenu("Antide") {
                 Button("Cancel Current Turn") {
                     viewModel.cancelTurn()
                 }

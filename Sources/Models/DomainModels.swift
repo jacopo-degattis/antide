@@ -234,6 +234,27 @@ public struct ThinkingState: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: - ACP Permission Requests
+
+public struct ACPPermissionOption: Codable, Sendable, Equatable, Identifiable {
+    public let optionId: String
+    public let name: String
+    public let kind: String?
+
+    public var id: String { optionId }
+}
+
+public struct PendingACPApproval: Codable, Sendable, Equatable, Identifiable {
+    public let requestId: String
+    public let requestIdIsNumeric: Bool
+    public let serverSessionId: String
+    public let toolCallId: String?
+    public let title: String
+    public let options: [ACPPermissionOption]
+
+    public var id: String { requestId }
+}
+
 // MARK: - Chat Message
 
 public enum MessageRole: String, Codable, Sendable {
@@ -250,6 +271,7 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     public var thinkingState: ThinkingState?
     public var toolCalls: [ToolCallItem]
     public var planSteps: [PlanStepItem]
+    public var pendingApproval: PendingACPApproval?
     public var isStreaming: Bool
 
     public init(
@@ -260,6 +282,7 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
         thinkingState: ThinkingState? = nil,
         toolCalls: [ToolCallItem] = [],
         planSteps: [PlanStepItem] = [],
+        pendingApproval: PendingACPApproval? = nil,
         isStreaming: Bool = false
     ) {
         self.id = id
@@ -269,7 +292,25 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
         self.thinkingState = thinkingState
         self.toolCalls = toolCalls
         self.planSteps = planSteps
+        self.pendingApproval = pendingApproval
         self.isStreaming = isStreaming
+    }
+}
+
+// MARK: - Workspace
+
+public struct Workspace: Identifiable, Codable, Sendable, Equatable {
+    public let id: UUID
+    public var path: String
+
+    public init(id: UUID = UUID(), path: String) {
+        self.id = id
+        self.path = URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    public var name: String {
+        let last = URL(fileURLWithPath: path).lastPathComponent
+        return last.isEmpty ? path : last
     }
 }
 

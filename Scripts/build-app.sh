@@ -22,6 +22,7 @@ mkdir -p "${RESOURCES_DIR}"
 
 cp "${RELEASE_BIN}" "${MACOS_DIR}/${APP_NAME}"
 chmod +x "${MACOS_DIR}/${APP_NAME}"
+cp "Resources/Antide.icns" "${RESOURCES_DIR}/Antide.icns"
 
 # Generate Info.plist
 cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
@@ -34,9 +35,11 @@ cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
     <key>CFBundleIdentifier</key>
     <string>com.antigravity.codex</string>
     <key>CFBundleName</key>
-    <string>AntigravityCodex</string>
+    <string>Antide</string>
     <key>CFBundleDisplayName</key>
-    <string>Antigravity</string>
+    <string>Antide</string>
+    <key>CFBundleIconFile</key>
+    <string>Antide</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

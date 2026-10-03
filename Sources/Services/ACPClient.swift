@@ -6,14 +6,15 @@ import AppKit
 public protocol ACPClientDelegate: AnyObject, Sendable {
     func clientDidUpdateConnectionStatus(_ status: ServerConnectionStatus)
     func clientDidRequireAuthentication(url: URL)
-    func clientDidReceiveThinkingStart()
-    func clientDidReceiveThinkingChunk(_ text: String)
-    func clientDidReceiveThinkingEnd()
-    func clientDidReceiveTextChunk(_ text: String)
-    func clientDidUpdateToolCall(_ toolCall: ToolCallItem)
-    func clientDidUpdatePlan(_ steps: [PlanStepItem])
-    func clientDidReceiveUsage(used: Int?, size: Int?)
-    func clientDidCompleteTurn()
+    func clientDidReceiveThinkingStart(serverSessionId: String)
+    func clientDidReceiveThinkingChunk(_ text: String, serverSessionId: String)
+    func clientDidReceiveThinkingEnd(serverSessionId: String)
+    func clientDidReceiveTextChunk(_ text: String, serverSessionId: String)
+    func clientDidUpdateToolCall(_ toolCall: ToolCallItem, serverSessionId: String)
+    func clientDidUpdatePlan(_ steps: [PlanStepItem], serverSessionId: String)
+    func clientDidReceiveUsage(used: Int?, size: Int?, serverSessionId: String)
+    func clientDidRequestPermission(_ request: PendingACPApproval)
+    func clientDidCompleteTurn(serverSessionId: String)
     func clientDidReceiveStderrLog(_ log: String)
 }
 
@@ -27,6 +28,7 @@ public final class ACPClient: @unchecked Sendable {
     private var listenTask: Task<Void, Never>?
     private var stderrTask: Task<Void, Never>?
     private var activeSessionId: String?
+    private var sessionWorkingDirectories: [String: String] = [:]
 
     public init(transport: any ACPTransport) {
         self.transport = transport
@@ -135,6 +137,7 @@ public final class ACPClient: @unchecked Sendable {
            let res = try? JSONDecoder().decode(ACPSessionNewResult.self, from: data) {
             lock.withLock {
                 self.activeSessionId = res.sessionId
+                self.sessionWorkingDirectories[res.sessionId] = validCwd
             }
             return res.sessionId
         }
@@ -146,12 +149,51 @@ public final class ACPClient: @unchecked Sendable {
         )
     }
 
+    public func loadSession(
+        sessionId: String,
+        cwd: String,
+        model: String?,
+        mode: ExecutionMode?,
+        systemPrompt: String?
+    ) async throws {
+        let workingDirectory = cwd.isEmpty || cwd == "/"
+            ? FileManager.default.homeDirectoryForCurrentUser.path
+            : cwd
+        var meta: [String: AnyCodable] = [:]
+        if let model, !model.isEmpty { meta["model"] = AnyCodable(model) }
+        if let systemPrompt, !systemPrompt.isEmpty { meta["systemPrompt"] = AnyCodable(systemPrompt) }
+
+        let params = ACPSessionLoadParams(
+            sessionId: sessionId,
+            cwd: workingDirectory,
+            modeId: mode?.rawValue,
+            meta: meta.isEmpty ? nil : meta
+        )
+        let response = try await sendRequest(JSONRPCRequest(method: "session/load", params: params), timeout: .seconds(60))
+        if let error = response.error { throw error }
+        lock.withLock { sessionWorkingDirectories[sessionId] = workingDirectory }
+    }
+
+    public func respondToPermission(_ request: PendingACPApproval, optionId: String) async throws {
+        let requestID: Any = request.requestIdIsNumeric
+            ? (Int64(request.requestId) as Any? ?? request.requestId)
+            : request.requestId
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": requestID,
+            "result": ["outcome": ["outcome": "selected", "optionId": optionId]]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        try await transport.send(data: data)
+    }
+
     public func sendPrompt(
         sessionId: String,
         text: String,
         model: String?,
         mode: ExecutionMode?,
-        effort: ReasoningEffort?
+        effort: ReasoningEffort?,
+        responseTimeout: Duration = .seconds(300)
     ) async throws {
         let promptParams = ACPSessionPromptParams(
             sessionId: sessionId,
@@ -161,14 +203,14 @@ public final class ACPClient: @unchecked Sendable {
             effort: effort?.rawValue
         )
         let req = JSONRPCRequest(method: "session/prompt", params: promptParams)
-        let response = try await sendRequest(req, timeout: .seconds(300))
+        let response = try await sendRequest(req, timeout: responseTimeout)
         if let error = response.error { throw error }
         // ACP session/prompt normally responds once the turn completes. A few
         // adapters return an explicit `accepted` acknowledgement and stream the
         // remainder asynchronously; those must be completed by their turn event.
         let wasOnlyAccepted = response.result?.dictionaryValue?["status"]?.stringValue == "accepted"
         if !wasOnlyAccepted {
-            delegate?.clientDidCompleteTurn()
+            delegate?.clientDidCompleteTurn(serverSessionId: sessionId)
         }
     }
 
@@ -229,17 +271,27 @@ public final class ACPClient: @unchecked Sendable {
             guard let self = self else { return }
 
             for await data in stream {
-                guard let raw = try? JSONDecoder().decode(RawInboundMessage.self, from: data) else {
+                let raw: RawInboundMessage
+                do {
+                    raw = try JSONDecoder().decode(RawInboundMessage.self, from: data)
+                } catch {
+                    let preview = String(data: data.prefix(1_000), encoding: .utf8) ?? "<non-UTF8 frame>"
+                    self.delegate?.clientDidReceiveStderrLog("ACP message decode failed: \(error.localizedDescription) — \(preview)")
                     continue
                 }
 
-                if let id = raw.id, !id.isEmpty {
-                    // Match pending response
+                if raw.id != nil, raw.method != nil {
+                    await self.handleServerRequest(raw)
+                } else if let id = raw.id, !id.isEmpty {
                     let continuation = self.lock.withLock { () -> CheckedContinuation<RawInboundMessage, Error>? in
                         self.requestTimeouts.removeValue(forKey: id)?.cancel()
                         return self.pendingRequests.removeValue(forKey: id)
                     }
-                    continuation?.resume(returning: raw)
+                    if let continuation {
+                        continuation.resume(returning: raw)
+                    } else {
+                        self.delegate?.clientDidReceiveStderrLog("Received an unmatched ACP response with id ‘\(id)’")
+                    }
                 } else if raw.isNotification {
                     await self.handleNotification(raw)
                 }
@@ -269,6 +321,129 @@ public final class ACPClient: @unchecked Sendable {
         }
     }
 
+    private func handleServerRequest(_ message: RawInboundMessage) async {
+        guard let requestID = message.id, let method = message.method else { return }
+        if method == "session/request_permission",
+           let params = message.params?.dictionaryValue,
+           let sessionId = params["sessionId"]?.stringValue {
+            let tool = params["toolCall"]?.dictionaryValue ?? [:]
+            let options = (params["options"]?.arrayValue ?? []).compactMap { value -> ACPPermissionOption? in
+                guard let option = value.dictionaryValue,
+                      let optionId = option["optionId"]?.stringValue,
+                      let name = option["name"]?.stringValue else { return nil }
+                return ACPPermissionOption(optionId: optionId, name: name, kind: option["kind"]?.stringValue)
+            }
+            let permission = PendingACPApproval(
+                requestId: requestID,
+                requestIdIsNumeric: message.idIsNumeric,
+                serverSessionId: sessionId,
+                toolCallId: tool["toolCallId"]?.stringValue ?? params["toolCallId"]?.stringValue,
+                title: tool["title"]?.stringValue ?? params["title"]?.stringValue ?? "Allow this action?",
+                options: options
+            )
+            delegate?.clientDidRequestPermission(permission)
+            return
+        }
+
+        if method == "fs/read_text_file" || method == "fs/write_text_file" {
+            await handleFilesystemRequest(message, method: method)
+            return
+        }
+
+        let requestIdValue: Any = message.idIsNumeric ? (Int64(requestID) as Any? ?? requestID) : requestID
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": requestIdValue,
+            "error": ["code": -32601, "message": "Unsupported ACP client request: \\(method)"]
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            try? await transport.send(data: data)
+        }
+        delegate?.clientDidReceiveStderrLog("Unsupported ACP server request: \\(method)")
+    }
+
+    private func handleFilesystemRequest(_ message: RawInboundMessage, method: String) async {
+        guard let requestID = message.id,
+              let params = message.params?.dictionaryValue,
+              let sessionID = params["sessionId"]?.stringValue,
+              let path = params["path"]?.stringValue else {
+            await sendServerError(id: message.id, numericID: message.idIsNumeric, code: -32602, message: "Invalid filesystem request parameters")
+            return
+        }
+
+        do {
+            let fileURL = try resolveFilesystemURL(path, sessionID: sessionID)
+            if method == "fs/read_text_file" {
+                let contents = try String(contentsOf: fileURL, encoding: .utf8)
+                let selectedContents: String
+                if let line = params["line"]?.intValue {
+                    let lines = contents.components(separatedBy: .newlines)
+                    let start = min(max(0, line - 1), lines.count)
+                    let count = max(0, params["limit"]?.intValue ?? (lines.count - start))
+                    selectedContents = lines.dropFirst(start).prefix(count).joined(separator: "\\n")
+                } else {
+                    selectedContents = contents
+                }
+                await sendServerResult(id: requestID, numericID: message.idIsNumeric, result: ["content": selectedContents])
+            } else {
+                guard let contents = params["content"]?.stringValue else {
+                    await sendServerError(id: message.id, numericID: message.idIsNumeric, code: -32602, message: "Missing text content for fs/write_text_file")
+                    return
+                }
+                try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try contents.write(to: fileURL, atomically: true, encoding: .utf8)
+                await sendServerResult(id: requestID, numericID: message.idIsNumeric, result: [:])
+            }
+        } catch {
+            delegate?.clientDidReceiveStderrLog("ACP \(method) failed for ‘\(path)’: \(error.localizedDescription)")
+            await sendServerError(id: message.id, numericID: message.idIsNumeric, code: -32002, message: error.localizedDescription)
+        }
+    }
+
+    private func resolveFilesystemURL(_ path: String, sessionID: String) throws -> URL {
+        guard let workingDirectory = lock.withLock({ sessionWorkingDirectories[sessionID] }) else {
+            throw NSError(domain: "ACPClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "No workspace is registered for ACP session \(sessionID)"])
+        }
+
+        let root = URL(fileURLWithPath: workingDirectory, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
+        let requestedURL = path.hasPrefix("/")
+            ? URL(fileURLWithPath: path)
+            : root.appendingPathComponent(path)
+        let target = requestedURL.standardizedFileURL.resolvingSymlinksInPath()
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard target.path.hasPrefix(rootPath), target.path != root.path else {
+            throw NSError(domain: "ACPClient", code: -2, userInfo: [NSLocalizedDescriptionKey: "ACP filesystem access is restricted to the selected workspace"])
+        }
+        return target
+    }
+
+    private func sendServerResult(id: String, numericID: Bool, result: [String: Any]) async {
+        let requestID: Any = numericID ? (Int64(id) as Any? ?? id) : id
+        let payload: [String: Any] = ["jsonrpc": "2.0", "id": requestID, "result": result]
+        await sendServerPayload(payload)
+    }
+
+    private func sendServerError(id: String?, numericID: Bool, code: Int, message: String) async {
+        let requestID: Any
+        if let id, numericID, let number = Int64(id) { requestID = number }
+        else { requestID = id as Any? ?? NSNull() }
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": requestID,
+            "error": ["code": code, "message": message]
+        ]
+        await sendServerPayload(payload)
+    }
+
+    private func sendServerPayload(_ payload: [String: Any]) async {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            try await transport.send(data: data)
+        } catch {
+            delegate?.clientDidReceiveStderrLog("Failed to reply to ACP filesystem request: \(error.localizedDescription)")
+        }
+    }
+
     private func handleNotification(_ msg: RawInboundMessage) async {
         guard let method = msg.method else { return }
 
@@ -282,41 +457,36 @@ public final class ACPClient: @unchecked Sendable {
     }
 
     private func handleSessionUpdate(_ params: AnyCodable?) {
-        guard var dict = params?.dictionaryValue else { return }
-        if let nested = dict["update"]?.dictionaryValue {
-            dict = nested
-        }
-
+        guard let params = params?.dictionaryValue,
+              let serverSessionId = params["sessionId"]?.stringValue else { return }
+        let dict = params["update"]?.dictionaryValue ?? params
         let updateType = dict["sessionUpdate"]?.stringValue ?? dict["type"]?.stringValue ?? ""
 
         switch updateType {
         case "thinking_start", "thinking":
-            delegate?.clientDidReceiveThinkingStart()
+            delegate?.clientDidReceiveThinkingStart(serverSessionId: serverSessionId)
 
         case "thinking_chunk", "agent_thought_chunk":
             if let chunk = textValue(dict["content"]) {
-                delegate?.clientDidReceiveThinkingChunk(chunk)
+                delegate?.clientDidReceiveThinkingChunk(chunk, serverSessionId: serverSessionId)
             }
 
         case "thinking_end":
-            delegate?.clientDidReceiveThinkingEnd()
+            delegate?.clientDidReceiveThinkingEnd(serverSessionId: serverSessionId)
 
         case "text_chunk", "content", "agent_message_chunk":
             if let chunk = textValue(dict["content"]) {
-                delegate?.clientDidReceiveTextChunk(chunk)
+                delegate?.clientDidReceiveTextChunk(chunk, serverSessionId: serverSessionId)
             }
 
         case "tool_call", "tool_call_update":
             if let toolDict = dict["toolCall"]?.dictionaryValue {
-                parseAndDispatchToolCall(toolDict)
+                parseAndDispatchToolCall(toolDict, serverSessionId: serverSessionId)
             } else {
-                // Some ACP adapters put the tool payload directly in `update`.
-                parseAndDispatchToolCall(dict)
+                parseAndDispatchToolCall(dict, serverSessionId: serverSessionId)
             }
 
         case "plan":
-            // The simulator/older adapters wrap steps in plan.steps; current ACP
-            // servers send `entries` directly with `content` and `priority`.
             let planDict = dict["plan"]?.dictionaryValue ?? dict
             let stepArray = planDict["steps"]?.arrayValue ?? planDict["entries"]?.arrayValue
             if let stepArray {
@@ -338,20 +508,22 @@ public final class ACPClient: @unchecked Sendable {
                         orderIndex: idx
                     )
                 }
-                delegate?.clientDidUpdatePlan(steps)
+                delegate?.clientDidUpdatePlan(steps, serverSessionId: serverSessionId)
             }
 
         case "usage_update":
-            let used = dict["used"]?.intValue
-            let size = dict["size"]?.intValue
-            delegate?.clientDidReceiveUsage(used: used, size: size)
+            delegate?.clientDidReceiveUsage(
+                used: dict["used"]?.intValue,
+                size: dict["size"]?.intValue,
+                serverSessionId: serverSessionId
+            )
 
         case "turn_completed", "turn_end":
-            delegate?.clientDidCompleteTurn()
+            delegate?.clientDidCompleteTurn(serverSessionId: serverSessionId)
 
         default:
             if let chunk = textValue(dict["content"]) {
-                delegate?.clientDidReceiveTextChunk(chunk)
+                delegate?.clientDidReceiveTextChunk(chunk, serverSessionId: serverSessionId)
             }
         }
     }
@@ -368,7 +540,7 @@ public final class ACPClient: @unchecked Sendable {
         return nil
     }
 
-    private func parseAndDispatchToolCall(_ dict: [String: AnyCodable]) {
+    private func parseAndDispatchToolCall(_ dict: [String: AnyCodable], serverSessionId: String) {
         let callId = dict["toolCallId"]?.stringValue ?? UUID().uuidString
         let title = dict["title"]?.stringValue ?? dict["name"]?.stringValue ?? "Tool Call"
         let kind = dict["kind"]?.stringValue ?? "generic"
@@ -422,7 +594,7 @@ public final class ACPClient: @unchecked Sendable {
             errorMessage: dict["error"]?.stringValue
         )
 
-        delegate?.clientDidUpdateToolCall(item)
+        delegate?.clientDidUpdateToolCall(item, serverSessionId: serverSessionId)
     }
 
     private func notifyStatus(_ status: ServerConnectionStatus) {

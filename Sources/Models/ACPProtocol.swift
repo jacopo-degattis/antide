@@ -52,6 +52,7 @@ public struct RawInboundMessage: Codable, Sendable {
     /// JSON-RPC permits string or integer request IDs. Normalize both to strings so
     /// servers implemented in Rust/Go (which commonly use integer IDs) work too.
     public let id: String?
+    public let idIsNumeric: Bool
     public let method: String?
     public let params: AnyCodable?
     public let result: AnyCodable?
@@ -62,10 +63,13 @@ public struct RawInboundMessage: Codable, Sendable {
         jsonrpc = try container.decode(String.self, forKey: .jsonrpc)
         if let stringID = try? container.decode(String.self, forKey: .id) {
             id = stringID
+            idIsNumeric = false
         } else if let integerID = try? container.decode(Int64.self, forKey: .id) {
             id = String(integerID)
+            idIsNumeric = true
         } else {
             id = nil
+            idIsNumeric = false
         }
         method = try container.decodeIfPresent(String.self, forKey: .method)
         params = try container.decodeIfPresent(AnyCodable.self, forKey: .params)
@@ -76,7 +80,11 @@ public struct RawInboundMessage: Codable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(jsonrpc, forKey: .jsonrpc)
-        try container.encodeIfPresent(id, forKey: .id)
+        if idIsNumeric, let id, let numericID = Int64(id) {
+            try container.encode(numericID, forKey: .id)
+        } else {
+            try container.encodeIfPresent(id, forKey: .id)
+        }
         try container.encodeIfPresent(method, forKey: .method)
         try container.encodeIfPresent(params, forKey: .params)
         try container.encodeIfPresent(result, forKey: .result)
@@ -140,7 +148,7 @@ public struct ACPClientCapabilities: Codable, Sendable {
     public let fs: FileSystem?
     public let terminal: Bool?
 
-    public init(fs: FileSystem? = FileSystem(), terminal: Bool? = true) {
+    public init(fs: FileSystem? = FileSystem(), terminal: Bool? = false) {
         self.fs = fs
         self.terminal = terminal
     }
@@ -192,6 +200,22 @@ public struct ACPSessionNewResult: Codable, Sendable {
     // ACP servers may return model/mode catalogs in their own nested extension
     // shapes. Keep this response minimal so unknown catalog shapes cannot make
     // an otherwise valid `session/new` look like a missing session ID.
+}
+
+public struct ACPSessionLoadParams: Codable, Sendable {
+    public let sessionId: String
+    public let cwd: String
+    public let mcpServers: [AnyCodable]
+    public let modeId: String?
+    public let _meta: [String: AnyCodable]?
+
+    public init(sessionId: String, cwd: String, modeId: String?, meta: [String: AnyCodable]?) {
+        self.sessionId = sessionId
+        self.cwd = cwd
+        self.mcpServers = []
+        self.modeId = modeId
+        self._meta = meta
+    }
 }
 
 public struct ACPModelInfo: Codable, Sendable, Identifiable {

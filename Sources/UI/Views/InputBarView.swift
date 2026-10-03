@@ -1,5 +1,5 @@
-import SwiftUI
 import AppKit
+import SwiftUI
 
 public struct InputBarView: View {
     @ObservedObject var viewModel: ChatViewModel
@@ -9,251 +9,318 @@ public struct InputBarView: View {
         self.viewModel = viewModel
     }
 
-    public var body: some View {
-        VStack(spacing: 8) {
-            // Main Input Container
-            VStack(spacing: 0) {
-                // Text Editor
-                ZStack(alignment: .topLeading) {
-                    if viewModel.inputText.isEmpty {
-                        Text("Ask Antigravity anything, plan an action, or run tools...")
-                            .font(.system(size: 13.5))
-                            .foregroundColor(CodexTheme.tertiaryText)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 12)
-                            .allowsHitTesting(false)
-                    }
-
-                    TextEditor(text: $viewModel.inputText)
-                        .font(.system(size: 13.5))
-                        .foregroundColor(CodexTheme.primaryText)
-                        .scrollContentBackground(.hidden)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .frame(minHeight: 44, maxHeight: 160)
-                        .focused($isFocused)
-                        .onKeyPress(.return, phases: .down) { press in
-                            if press.modifiers.contains(.shift) {
-                                return .ignored
-                            }
-                            viewModel.sendCurrentPrompt()
-                            return .handled
-                        }
-                }
-
-                Divider().background(CodexTheme.border.opacity(0.6))
-
-                // Bottom toolbar row
-                HStack(spacing: 8) {
-                    // Working Directory Pill
-                    workspacePicker
-
-                    // Execution Mode Selector
-                    modePicker
-
-                    // Model Selector
-                    modelPicker
-
-                    Spacer()
-
-                    // Send or Cancel Button
-                    if viewModel.isGenerating {
-                        Button {
-                            viewModel.cancelTurn()
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "stop.fill")
-                                    .font(.system(size: 10))
-                                Text("Stop")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                            .foregroundColor(CodexTheme.accentRed)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(CodexTheme.accentRed.opacity(0.15))
-                            .cornerRadius(14)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 14)
-                                    .stroke(CodexTheme.accentRed.opacity(0.4), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .help("Cancel current generation (Cmd+.)")
-                    } else {
-                        Button {
-                            viewModel.sendCurrentPrompt()
-                        } label: {
-                            Image(systemName: "arrow.up.circle.fill")
-                                .font(.system(size: 24))
-                                .foregroundColor(
-                                    viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                        ? CodexTheme.surfaceHighlight
-                                        : CodexTheme.accentBlue
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .help("Send prompt (Return)")
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(CodexTheme.surface.opacity(0.5))
-            }
-            .background(CodexTheme.secondaryBackground)
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(
-                        isFocused ? CodexTheme.accentBlue.opacity(0.6) : CodexTheme.border,
-                        lineWidth: 1
-                    )
-            )
-        }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 14)
+    private var canSend: Bool {
+        !viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !viewModel.isGenerating
     }
 
-    // MARK: - Subviews
+    public var body: some View {
+        VStack(spacing: 0) {
+            contextBar
+                .padding(.bottom, -1)
 
-    private var workspacePicker: some View {
-        Button {
-            chooseFolder()
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "folder")
-                    .font(.system(size: 10.5))
-                    .foregroundColor(CodexTheme.secondaryText)
+            VStack(spacing: 0) {
+                editor
+                    .padding(.horizontal, 12)
+                    .padding(.top, 7)
+                    .padding(.bottom, 2)
 
-                Text(currentFolderDisplayName)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(CodexTheme.secondaryText)
-                    .lineLimit(1)
+                HStack(spacing: 7) {
+                    attachmentMenu
+                    modePicker
+                    Spacer(minLength: 8)
+                    modelPicker
+                    effortPicker
+                    turnButton
+                }
+                .padding(.horizontal, 11)
+                .padding(.bottom, 7)
             }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(CodexTheme.surfaceHighlight.opacity(0.6))
-            .cornerRadius(6)
+            .background(CodexTheme.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .strokeBorder(isFocused ? Color.white.opacity(0.20) : CodexTheme.border, lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.18), radius: 20, y: 6)
+
+            Text("Antigravity can make mistakes. Review important changes.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(CodexTheme.tertiaryText)
+                .padding(.top, 8)
         }
-        .buttonStyle(.plain)
-        .help("Change active workspace directory")
+        .frame(maxWidth: 830)
+        .padding(.horizontal, 24)
+        .padding(.top, 10)
+        .padding(.bottom, 19)
+    }
+
+    private var contextBar: some View {
+        HStack(spacing: 4) {
+            Menu {
+                Button {
+                    chooseWorkspace()
+                } label: {
+                    Label("Choose workspace…", systemImage: "folder")
+                }
+                Button {
+                    if let id = viewModel.selectedSessionId {
+                        viewModel.moveSession(id, toWorkspacePath: nil)
+                    }
+                } label: {
+                    Label("Move to general chat", systemImage: "bubble.left")
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: workspacePath.isEmpty ? "bubble.left" : "folder")
+                    Text(workspaceName)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(CodexTheme.tertiaryText)
+                }
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(CodexTheme.secondaryText)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .contentShape(Capsule())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help(workspacePath.isEmpty ? "General chat — no project folder" : workspacePath)
+
+            contextDivider
+
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(connectionColor)
+                    .frame(width: 6, height: 6)
+                Text("Local")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(CodexTheme.secondaryText)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .help(viewModel.connectionStatus.displayText)
+
+            Spacer(minLength: 0)
+
+            Button {
+                Task { await viewModel.reconnect() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(CodexTheme.tertiaryText)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Reconnect to ACP")
+        }
+        .padding(.horizontal, 5)
+    }
+
+    private var contextDivider: some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(CodexTheme.border)
+            .frame(width: 1, height: 16)
+    }
+
+    private var editor: some View {
+        TextField("Ask anything, or describe what you want to build", text: $viewModel.inputText, axis: .vertical)
+            .font(.system(size: 14))
+            .foregroundStyle(CodexTheme.primaryText)
+            .textFieldStyle(.plain)
+            .lineLimit(1...4)
+            .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 112, alignment: .topLeading)
+            .focused($isFocused)
+            .onKeyPress(.return, phases: .down) { press in
+                if press.modifiers.contains(.shift) { return .ignored }
+                guard canSend else { return .handled }
+                viewModel.sendCurrentPrompt()
+                return .handled
+            }
+    }
+
+    private var attachmentMenu: some View {
+        Menu {
+            Button(action: chooseWorkspace) {
+                Label("Add workspace folder", systemImage: "folder.badge.plus")
+            }
+            Button {
+                viewModel.inputText += "@"
+                isFocused = true
+            } label: {
+                Label("Mention a file or folder", systemImage: "at")
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(CodexTheme.secondaryText)
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
+        }
+        .menuStyle(.borderlessButton)
+        .help("Add context")
     }
 
     private var modePicker: some View {
         Menu {
             ForEach(ExecutionMode.allCases) { mode in
                 Button {
-                    if let sId = viewModel.selectedSessionId,
-                       let idx = viewModel.sessions.firstIndex(where: { $0.id == sId }) {
-                        viewModel.sessions[idx].mode = mode
-                    }
+                    if let index = activeSessionIndex { viewModel.sessions[index].mode = mode }
                 } label: {
-                    HStack {
-                        Image(systemName: mode.systemSymbol)
-                        Text(mode.title)
+                    if currentMode == mode {
+                        Label(mode.title, systemImage: "checkmark")
+                    } else {
+                        Label(mode.title, systemImage: mode.systemSymbol)
                     }
                 }
             }
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 Image(systemName: currentMode.systemSymbol)
-                    .font(.system(size: 10))
-                    .foregroundColor(currentModeColor)
-
-                Text(currentMode.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(currentModeColor)
-
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8))
-                    .foregroundColor(CodexTheme.tertiaryText)
+                    .font(.system(size: 11))
+                Text(currentMode == .default ? "Approve for me" : currentMode.title)
+                    .font(.system(size: 11.5, weight: .medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(CodexTheme.tertiaryText)
             }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(currentModeColor.opacity(0.12))
-            .cornerRadius(6)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(currentModeColor.opacity(0.25), lineWidth: 1)
-            )
+            .foregroundStyle(CodexTheme.secondaryText)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .contentShape(Capsule())
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Execution mode (Default, YOLO, Plan, Accept Edits)")
+        .help("Choose how the agent handles approvals")
     }
 
     private var modelPicker: some View {
         Menu {
             ForEach(ModelOption.standardModels) { model in
                 Button {
-                    if let sId = viewModel.selectedSessionId,
-                       let idx = viewModel.sessions.firstIndex(where: { $0.id == sId }) {
-                        viewModel.sessions[idx].modelId = model.id
-                    }
+                    if let index = activeSessionIndex { viewModel.sessions[index].modelId = model.id }
                 } label: {
-                    Text(model.name)
+                    if currentModel == model.id {
+                        Label(model.name, systemImage: "checkmark")
+                    } else {
+                        Text(model.name)
+                    }
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "cpu")
-                    .font(.system(size: 10))
-                    .foregroundColor(CodexTheme.secondaryText)
-
-                Text(currentModelDisplayName)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(CodexTheme.secondaryText)
-
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8))
-                    .foregroundColor(CodexTheme.tertiaryText)
+            HStack(spacing: 5) {
+                Text(modelShortName)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(CodexTheme.tertiaryText)
             }
             .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(CodexTheme.surfaceHighlight.opacity(0.6))
-            .cornerRadius(6)
+            .padding(.vertical, 7)
+            .contentShape(Capsule())
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Select AI Model")
+        .help("Select model")
     }
 
-    private var currentMode: ExecutionMode {
-        viewModel.activeSession?.mode ?? .default
+    private var effortPicker: some View {
+        Menu {
+            ForEach(ReasoningEffort.allCases) { effort in
+                Button {
+                    if let index = activeSessionIndex { viewModel.sessions[index].reasoningEffort = effort }
+                } label: {
+                    if currentEffort == effort {
+                        Label(effort.title, systemImage: "checkmark")
+                    } else {
+                        Text(effort.title)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(currentEffort.title.replacingOccurrences(of: " Effort", with: ""))
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(CodexTheme.secondaryText)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(CodexTheme.tertiaryText)
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 7)
+            .contentShape(Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Reasoning effort")
     }
 
-    private var currentModeColor: Color {
-        switch currentMode {
-        case .yolo: return CodexTheme.accentAmber
-        case .autoEdit: return CodexTheme.accentCyan
-        case .plan: return CodexTheme.accentPurple
-        default: return CodexTheme.accentGreen
+    private var turnButton: some View {
+        Button {
+            if viewModel.isGenerating {
+                viewModel.cancelTurn()
+            } else if canSend {
+                viewModel.sendCurrentPrompt()
+            }
+        } label: {
+            Image(systemName: viewModel.isGenerating ? "stop.fill" : "arrow.up")
+                .font(.system(size: viewModel.isGenerating ? 12 : 15, weight: .semibold))
+                .foregroundStyle(.white.opacity(canSend || viewModel.isGenerating ? 1 : 0.5))
+                .frame(width: 32, height: 32)
+                .background(
+                    viewModel.isGenerating ? CodexTheme.accentRed : CodexTheme.accentBlue,
+                    in: Circle()
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSend && !viewModel.isGenerating)
+        .help(viewModel.isGenerating ? "Stop generation (⌘.)" : "Send message (Return)")
+    }
+
+    private var currentMode: ExecutionMode { viewModel.activeSession?.mode ?? .default }
+    private var currentModel: String { viewModel.activeSession?.modelId ?? "gemini-3.1-pro" }
+    private var currentEffort: ReasoningEffort { viewModel.activeSession?.reasoningEffort ?? .high }
+    private var activeSessionIndex: Int? {
+        guard let id = viewModel.selectedSessionId else { return nil }
+        return viewModel.sessions.firstIndex(where: { $0.id == id })
+    }
+
+    private var workspacePath: String {
+        viewModel.activeSession?.workspacePath ?? ""
+    }
+
+    private var workspaceName: String {
+        guard !workspacePath.isEmpty else { return "General chat" }
+        let name = URL(fileURLWithPath: workspacePath).lastPathComponent
+        return name.isEmpty ? "Workspace" : name
+    }
+
+    private var modelShortName: String {
+        ModelOption.standardModels.first(where: { $0.id == currentModel })?.name.components(separatedBy: " (").first ?? currentModel
+    }
+
+    private var connectionColor: Color {
+        switch viewModel.connectionStatus {
+        case .connected: CodexTheme.accentGreen
+        case .connecting: CodexTheme.accentAmber
+        case .error: CodexTheme.accentRed
+        case .disconnected: CodexTheme.tertiaryText
         }
     }
 
-    private var currentModelDisplayName: String {
-        let mId = viewModel.activeSession?.modelId ?? "gemini-3.1-pro"
-        return ModelOption.standardModels.first(where: { $0.id == mId })?.name.components(separatedBy: " ").first ?? mId
-    }
-
-    private var currentFolderDisplayName: String {
-        let path = viewModel.activeSession?.workspacePath ?? FileManager.default.currentDirectoryPath
-        let url = URL(fileURLWithPath: path)
-        return url.lastPathComponent.isEmpty ? path : url.lastPathComponent
-    }
-
-    private func chooseFolder() {
+    private func chooseWorkspace() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
-
-        if panel.runModal() == .OK, let url = panel.url {
-            if let sId = viewModel.selectedSessionId,
-               let idx = viewModel.sessions.firstIndex(where: { $0.id == sId }) {
-                viewModel.sessions[idx].workspacePath = url.path
-            }
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url,
+           let id = viewModel.selectedSessionId {
+            let workspace = viewModel.addWorkspace(at: url.path)
+            viewModel.moveSession(id, toWorkspacePath: workspace.path)
         }
     }
 }

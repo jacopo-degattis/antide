@@ -1,36 +1,29 @@
 import SwiftUI
 
+/// Neutral graphite palette modeled after Codex for macOS, with restrained blue
+/// accents for selection and primary actions.
 public enum CodexTheme {
-    // Backgrounds
-    public static let background = Color(red: 13/255, green: 17/255, blue: 23/255)
-    public static let secondaryBackground = Color(red: 22/255, green: 27/255, blue: 34/255)
-    public static let surface = Color(red: 33/255, green: 38/255, blue: 45/255)
-    public static let surfaceHighlight = Color(red: 48/255, green: 54/255, blue: 61/255)
+    public static let background = Color(red: 24 / 255, green: 24 / 255, blue: 24 / 255)
+    public static let secondaryBackground = Color(red: 30 / 255, green: 30 / 255, blue: 30 / 255)
+    public static let surface = Color(red: 39 / 255, green: 39 / 255, blue: 39 / 255)
+    public static let surfaceHighlight = Color(red: 53 / 255, green: 53 / 255, blue: 53 / 255)
 
-    // Borders
-    public static let border = Color(red: 48/255, green: 54/255, blue: 61/255).opacity(0.8)
-    public static let subtleBorder = Color.white.opacity(0.08)
+    public static let border = Color.white.opacity(0.085)
+    public static let subtleBorder = Color.white.opacity(0.055)
 
-    // Text
-    public static let primaryText = Color(red: 240/255, green: 246/255, blue: 252/255)
-    public static let secondaryText = Color(red: 139/255, green: 148/255, blue: 158/255)
-    public static let tertiaryText = Color(red: 110/255, green: 118/255, blue: 129/255)
+    public static let primaryText = Color(red: 242 / 255, green: 242 / 255, blue: 242 / 255)
+    public static let secondaryText = Color(red: 180 / 255, green: 180 / 255, blue: 180 / 255)
+    public static let tertiaryText = Color(red: 126 / 255, green: 126 / 255, blue: 126 / 255)
 
-    // Accents
-    public static let accentBlue = Color(red: 88/255, green: 166/255, blue: 255/255)
-    public static let accentCyan = Color(red: 56/255, green: 189/255, blue: 248/255)
-    public static let accentGreen = Color(red: 63/255, green: 185/255, blue: 80/255)
-    public static let accentAmber = Color(red: 210/255, green: 153/255, blue: 34/255)
-    public static let accentPurple = Color(red: 163/255, green: 113/255, blue: 247/255)
-    public static let accentRed = Color(red: 248/255, green: 81/255, blue: 73/255)
+    public static let accentBlue = Color(red: 76 / 255, green: 121 / 255, blue: 211 / 255)
+    public static let accentCyan = Color(red: 105 / 255, green: 164 / 255, blue: 194 / 255)
+    public static let accentGreen = Color(red: 95 / 255, green: 165 / 255, blue: 119 / 255)
+    public static let accentAmber = Color(red: 199 / 255, green: 157 / 255, blue: 83 / 255)
+    public static let accentPurple = Color(red: 155 / 255, green: 139 / 255, blue: 190 / 255)
+    public static let accentRed = Color(red: 201 / 255, green: 102 / 255, blue: 96 / 255)
 
-    // Thinking Gradient
     public static let thinkingGradient = LinearGradient(
-        colors: [
-            Color(red: 163/255, green: 113/255, blue: 247/255),
-            Color(red: 88/255, green: 166/255, blue: 255/255),
-            Color(red: 56/255, green: 189/255, blue: 248/255)
-        ],
+        colors: [accentPurple, accentBlue, accentCyan],
         startPoint: .leading,
         endPoint: .trailing
     )

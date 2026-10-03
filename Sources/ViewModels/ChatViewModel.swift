@@ -2,25 +2,81 @@ import Foundation
 import SwiftUI
 import Combine
 
+private struct ChatArchive: Codable {
+    var sessions: [ChatSession]
+    var selectedSessionId: UUID?
+}
+
+private struct QueuedTurn {
+    let sessionID: UUID
+    let text: String
+    let model: String
+    let mode: ExecutionMode
+    let effort: ReasoningEffort
+}
+
 @MainActor
 public final class ChatViewModel: ObservableObject, ACPClientDelegate {
-    @Published public var sessions: [ChatSession] = []
-    @Published public var selectedSessionId: UUID?
+    @Published public var sessions: [ChatSession] = [] {
+        didSet { scheduleArchiveWrite() }
+    }
+    @Published public var workspaces: [Workspace] = []
+    @Published public var selectedSessionId: UUID? {
+        didSet { scheduleArchiveWrite() }
+    }
+    @Published public private(set) var generatingSessionIDs: Set<UUID> = []
     @Published public var connectionStatus: ServerConnectionStatus = .disconnected
     @Published public var inputText: String = ""
-    @Published public var isGenerating: Bool = false
     @Published public var telemetryLogs: [String] = []
     @Published public var activeAuthURL: URL? = nil
 
     private var client: ACPClient?
     private let settings = SettingsManager.shared
-    private var thinkingTimer: AnyCancellable?
+    private let workspacesStorageKey = "antide.workspaces"
+    private let archiveFileURL: URL
+    private let archiveWriteQueue = DispatchQueue(label: "Antide.chat-archive", qos: .utility)
+    private var persistenceTask: Task<Void, Never>?
+    /// Local chat IDs whose server-side ACP sessions have been loaded on the
+    /// currently connected transport.
+    private var loadedServerSessions: Set<UUID> = []
+    private var sessionInitializationTasks: [UUID: Task<Bool, Never>] = [:]
+    /// The bundled Antigravity ACP agent is a single foreground-turn process.
+    /// Keep UI conversations independent, but send prompts to that process in a
+    /// FIFO so its foreground tool execution cannot cross-wire separate chats.
+    private var queuedTurns: [QueuedTurn] = []
+    private var activeTurnQueueID: UUID?
 
     public init() {
-        createInitialSession()
-        Task {
-            await reconnect()
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Antide", isDirectory: true)
+        archiveFileURL = appSupport.appendingPathComponent("chats.json")
+        workspaces = Self.loadWorkspaces()
+
+        let archive = Self.loadArchive(from: archiveFileURL)
+        sessions = archive?.sessions ?? []
+        selectedSessionId = archive?.selectedSessionId
+
+        // A permission dialog or turn cannot survive the server process. Restore
+        // the transcript, but close transient activity indicators cleanly.
+        for sessionIndex in sessions.indices {
+            for messageIndex in sessions[sessionIndex].messages.indices {
+                sessions[sessionIndex].messages[messageIndex].pendingApproval = nil
+                if sessions[sessionIndex].messages[messageIndex].isStreaming {
+                    sessions[sessionIndex].messages[messageIndex].isStreaming = false
+                    sessions[sessionIndex].messages[messageIndex].thinkingState?.isThinking = false
+                    sessions[sessionIndex].messages[messageIndex].content += "\n\n*(Antide was closed before this turn finished.)*"
+                }
+            }
         }
+
+        if sessions.isEmpty {
+            createInitialSession()
+        } else if selectedSessionId == nil || !sessions.contains(where: { $0.id == selectedSessionId }) {
+            selectedSessionId = sessions.first?.id
+        }
+        scheduleArchiveWrite()
+
+        Task { await reconnect() }
     }
 
     public var activeSession: ChatSession? {
@@ -29,68 +85,174 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
             return sessions.first(where: { $0.id == id })
         }
         set {
-            guard let newValue = newValue, let idx = sessions.firstIndex(where: { $0.id == newValue.id }) else { return }
-            sessions[idx] = newValue
+            guard let newValue, let index = sessions.firstIndex(where: { $0.id == newValue.id }) else { return }
+            sessions[index] = newValue
         }
     }
 
-    // MARK: - Session Management
+    /// The composer and stop control are scoped to the selected chat.
+    public var isGenerating: Bool {
+        guard let selectedSessionId else { return false }
+        return generatingSessionIDs.contains(selectedSessionId)
+    }
+
+    public func isGenerating(sessionID: UUID) -> Bool {
+        generatingSessionIDs.contains(sessionID)
+    }
+
+    // MARK: - Session and workspace management
 
     public func createInitialSession() {
-        if sessions.isEmpty {
-            let session = ChatSession(
-                title: "New Chat",
-                mode: settings.defaultMode,
-                modelId: settings.defaultModel,
-                reasoningEffort: settings.defaultEffort,
-                workspacePath: settings.resolvedWorkingDirectory
-            )
-            sessions.append(session)
-            selectedSessionId = session.id
-        }
-    }
-
-    public func newSession() {
+        guard sessions.isEmpty else { return }
         let session = ChatSession(
             title: "New Chat",
             mode: settings.defaultMode,
             modelId: settings.defaultModel,
             reasoningEffort: settings.defaultEffort,
-            workspacePath: settings.resolvedWorkingDirectory
+            workspacePath: ""
+        )
+        sessions.append(session)
+        selectedSessionId = session.id
+    }
+
+    /// A nil workspace path creates a general chat; a path creates a chat rooted
+    /// in that project folder. Every click on a section/project plus creates one
+    /// independent ACP session.
+    public func newSession(inWorkspacePath workspacePath: String? = nil) {
+        let path = workspacePath.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? ""
+        let session = ChatSession(
+            title: "New Chat",
+            mode: settings.defaultMode,
+            modelId: settings.defaultModel,
+            reasoningEffort: settings.defaultEffort,
+            workspacePath: path
         )
         sessions.insert(session, at: 0)
         selectedSessionId = session.id
-
-        Task {
-            await initializeServerSession(for: session.id)
-        }
     }
 
     public func selectSession(_ id: UUID) {
         selectedSessionId = id
-        if let session = sessions.first(where: { $0.id == id }), session.serverSessionId == nil, client?.isConnected == true {
-            Task { await initializeServerSession(for: id) }
-        }
+    }
+
+    public func moveSession(_ id: UUID, toWorkspacePath path: String?) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let destination = path.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? ""
+        guard sessions[index].workspacePath != destination else { return }
+
+        if generatingSessionIDs.contains(id) { cancelTurn(for: id) }
+        sessionInitializationTasks.removeValue(forKey: id)?.cancel()
+        sessions[index].workspacePath = destination
+        sessions[index].serverSessionId = nil
+        loadedServerSessions.remove(id)
     }
 
     public func deleteSession(_ id: UUID) {
-        sessions.removeAll(where: { $0.id == id })
-        if selectedSessionId == id {
-            selectedSessionId = sessions.first?.id
-        }
-        if sessions.isEmpty {
-            newSession()
+        let workspacePath = sessions.first(where: { $0.id == id })?.workspacePath ?? ""
+        if generatingSessionIDs.contains(id) { cancelTurn(for: id) }
+        sessionInitializationTasks.removeValue(forKey: id)?.cancel()
+        sessions.removeAll { $0.id == id }
+        loadedServerSessions.remove(id)
+        if selectedSessionId == id { selectedSessionId = sessions.first?.id }
+        if sessions.isEmpty { newSession(inWorkspacePath: workspacePath.isEmpty ? nil : workspacePath) }
+    }
+
+    @discardableResult
+    public func addWorkspace(at path: String) -> Workspace {
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        if let existing = workspaces.first(where: { $0.path == normalized }) { return existing }
+        let workspace = Workspace(path: normalized)
+        workspaces.append(workspace)
+        persistWorkspaces()
+        return workspace
+    }
+
+    public func removeWorkspace(_ id: UUID) {
+        guard let workspace = workspaces.first(where: { $0.id == id }) else { return }
+        workspaces.removeAll { $0.id == id }
+        persistWorkspaces()
+
+        for index in sessions.indices where sessions[index].workspacePath == workspace.path {
+            let localID = sessions[index].id
+            if generatingSessionIDs.contains(localID) { cancelTurn(for: localID) }
+            sessionInitializationTasks.removeValue(forKey: localID)?.cancel()
+            sessions[index].workspacePath = ""
+            sessions[index].serverSessionId = nil
+            loadedServerSessions.remove(localID)
         }
     }
 
-    // MARK: - Client & Transport Lifecycle
+    private func persistWorkspaces() {
+        guard let data = try? JSONEncoder().encode(workspaces) else { return }
+        UserDefaults.standard.set(data, forKey: workspacesStorageKey)
+    }
+
+    private static func loadWorkspaces() -> [Workspace] {
+        guard let data = UserDefaults.standard.data(forKey: "antide.workspaces"),
+              let stored = try? JSONDecoder().decode([Workspace].self, from: data) else { return [] }
+        return stored.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    // MARK: - Persistent chat archive
+
+    private func scheduleArchiveWrite() {
+        guard !sessions.isEmpty else { return }
+        let archive = ChatArchive(sessions: sessions, selectedSessionId: selectedSessionId)
+        persistenceTask?.cancel()
+        persistenceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled, let self,
+                  let data = try? JSONEncoder().encode(archive) else { return }
+            let destination = self.archiveFileURL
+            self.archiveWriteQueue.async {
+                do {
+                    try Self.writeArchive(data, to: destination)
+                } catch {
+                    NSLog("Antide: failed to save chat archive: %@", error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func writeArchive(_ data: Data, to destination: URL) throws {
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: destination, options: .atomic)
+    }
+
+    private static func loadArchive(from url: URL) -> ChatArchive? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ChatArchive.self, from: data)
+    }
+
+    /// Synchronously commits the current transcript when the last app window
+    /// closes, in addition to the debounced streaming writes.
+    public func flushArchive() {
+        persistenceTask?.cancel()
+        let archive = ChatArchive(sessions: sessions, selectedSessionId: selectedSessionId)
+        do {
+            let data = try JSONEncoder().encode(archive)
+            let destination = archiveFileURL
+            try archiveWriteQueue.sync {
+                try Self.writeArchive(data, to: destination)
+            }
+        } catch {
+            appendLog("Failed to save chat archive: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - ACP lifecycle and resumable sessions
 
     public func reconnect() async {
+        for id in Array(generatingSessionIDs) { finishTurn(localSessionID: id, cancelled: true, advanceQueue: false) }
+        queuedTurns.removeAll()
+        activeTurnQueueID = nil
+        for task in sessionInitializationTasks.values { task.cancel() }
+        sessionInitializationTasks.removeAll()
         await client?.disconnect()
-        // Server session IDs are scoped to their transport/server process.
-        for index in sessions.indices {
-            sessions[index].serverSessionId = nil
-        }
+        loadedServerSessions.removeAll()
 
         let transport: any ACPTransport
         switch settings.transportMode {
@@ -105,275 +267,338 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
                 traceLogging: settings.traceLogging
             )
         case .websocket:
-            if let url = settings.webSocketURL {
-                transport = ACPWebSocketClient(url: url)
-            } else {
+            guard let url = settings.webSocketURL else {
                 connectionStatus = .error("Invalid WebSocket URL")
                 return
             }
+            transport = ACPWebSocketClient(url: url)
         case .mock:
             transport = ACPMockClient()
         }
 
         let newClient = ACPClient(transport: transport)
         newClient.delegate = self
-        self.client = newClient
+        client = newClient
 
         do {
             try await newClient.connect()
-            if let active = activeSession {
-                await initializeServerSession(for: active.id)
-            }
         } catch {
             connectionStatus = .error(error.localizedDescription)
         }
     }
 
-    private func initializeServerSession(for sessionId: UUID) async {
-        guard let client = client, client.isConnected else { return }
-        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
+    private func ensureServerSession(for localSessionID: UUID) async -> Bool {
+        if loadedServerSessions.contains(localSessionID) { return true }
+        if let pending = sessionInitializationTasks[localSessionID] { return await pending.value }
 
-        if sessions[idx].workspacePath.isEmpty || sessions[idx].workspacePath == "/" {
-            sessions[idx].workspacePath = settings.resolvedWorkingDirectory
+        let task = Task { @MainActor in await self.loadOrCreateServerSession(for: localSessionID) }
+        sessionInitializationTasks[localSessionID] = task
+        let succeeded = await task.value
+        sessionInitializationTasks.removeValue(forKey: localSessionID)
+        return succeeded
+    }
+
+    private func loadOrCreateServerSession(for localSessionID: UUID) async -> Bool {
+        guard let client, client.isConnected,
+              let initialIndex = sessions.firstIndex(where: { $0.id == localSessionID }) else { return false }
+
+        let snapshot = sessions[initialIndex]
+        let cwd = snapshot.workspacePath.isEmpty ? settings.resolvedWorkingDirectory : snapshot.workspacePath
+        let prompt = settings.customSystemPrompt.isEmpty ? nil : settings.customSystemPrompt
+
+        if let serverID = snapshot.serverSessionId {
+            do {
+                try await client.loadSession(
+                    sessionId: serverID,
+                    cwd: cwd,
+                    model: snapshot.modelId,
+                    mode: snapshot.mode,
+                    systemPrompt: prompt
+                )
+                guard let index = sessions.firstIndex(where: { $0.id == localSessionID }),
+                      sessions[index].serverSessionId == serverID,
+                      sessions[index].workspacePath == snapshot.workspacePath else { return false }
+                loadedServerSessions.insert(localSessionID)
+                return true
+            } catch {
+                appendLog("Could not resume \(snapshot.title); creating a fresh ACP session: \(error.localizedDescription)")
+                if let index = sessions.firstIndex(where: { $0.id == localSessionID }),
+                   sessions[index].serverSessionId == serverID {
+                    sessions[index].serverSessionId = nil
+                }
+            }
         }
-        let s = sessions[idx]
+
         do {
-            let serverId = try await client.createSession(
-                cwd: s.workspacePath,
-                model: s.modelId,
-                mode: s.mode,
-                systemPrompt: settings.customSystemPrompt.isEmpty ? nil : settings.customSystemPrompt
+            let serverID = try await client.createSession(
+                cwd: cwd,
+                model: snapshot.modelId,
+                mode: snapshot.mode,
+                systemPrompt: prompt
             )
-            sessions[idx].serverSessionId = serverId
+            guard let index = sessions.firstIndex(where: { $0.id == localSessionID }),
+                  sessions[index].workspacePath == snapshot.workspacePath else { return false }
+            sessions[index].serverSessionId = serverID
+            loadedServerSessions.insert(localSessionID)
+            return true
         } catch {
             appendLog("Error creating server session: \(error.localizedDescription)")
+            return false
         }
     }
 
-    // MARK: - Prompting & Turn Execution
+    private func localSessionIndex(serverSessionID: String) -> Int? {
+        sessions.firstIndex { $0.serverSessionId == serverSessionID }
+    }
+
+    // MARK: - Prompting and concurrent turns
 
     public func sendCurrentPrompt() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isGenerating else { return }
-        guard let sId = selectedSessionId, let idx = sessions.firstIndex(where: { $0.id == sId }) else { return }
+        guard !text.isEmpty,
+              let localID = selectedSessionId,
+              !generatingSessionIDs.contains(localID),
+              let index = sessions.firstIndex(where: { $0.id == localID }) else { return }
 
         inputText = ""
-
-        // Append User Message
-        let userMessage = ChatMessage(role: .user, content: text)
-        sessions[idx].messages.append(userMessage)
-
-        // Set title if it's the first message
-        if sessions[idx].messages.filter({ $0.role == .user }).count == 1 {
+        sessions[index].messages.append(ChatMessage(role: .user, content: text))
+        if sessions[index].messages.filter({ $0.role == .user }).count == 1 {
             let title = String(text.prefix(36)).trimmingCharacters(in: .whitespacesAndNewlines)
-            sessions[idx].title = title.isEmpty ? "New Chat" : title
+            sessions[index].title = title.isEmpty ? "New Chat" : title
         }
-
-        // Prepare Assistant Message
-        let assistantMessage = ChatMessage(
+        sessions[index].updatedAt = Date()
+        sessions[index].messages.append(ChatMessage(
             role: .assistant,
             content: "",
             thinkingState: ThinkingState(isThinking: true, content: "", startTime: Date()),
             toolCalls: [],
             planSteps: [],
             isStreaming: true
-        )
-        sessions[idx].messages.append(assistantMessage)
-        isGenerating = true
+        ))
+        generatingSessionIDs.insert(localID)
 
-        let currentSession = sessions[idx]
-        let validCwd = (currentSession.workspacePath.isEmpty || currentSession.workspacePath == "/")
-            ? self.settings.resolvedWorkingDirectory
-            : currentSession.workspacePath
+        let snapshot = sessions[index]
+        queuedTurns.append(QueuedTurn(
+            sessionID: localID,
+            text: text,
+            model: snapshot.modelId,
+            mode: snapshot.mode,
+            effort: snapshot.reasoningEffort
+        ))
+        startNextTurnIfNeeded()
+    }
 
-        if self.sessions[idx].workspacePath != validCwd {
-            self.sessions[idx].workspacePath = validCwd
+    private func startNextTurnIfNeeded() {
+        guard activeTurnQueueID == nil else { return }
+        while !queuedTurns.isEmpty {
+            let turn = queuedTurns.removeFirst()
+            guard generatingSessionIDs.contains(turn.sessionID),
+                  sessions.contains(where: { $0.id == turn.sessionID }) else { continue }
+            activeTurnQueueID = turn.sessionID
+            Task { await runTurn(turn) }
+            return
         }
+    }
 
-        Task {
-            guard let client = self.client else {
-                self.appendAssistantError(sessionId: sId, errorText: "Not connected to an ACP server. Check Preferences → Connection and reconnect.")
-                self.isGenerating = false
+    private func runTurn(_ turn: QueuedTurn) async {
+        guard let client else {
+            failTurn(localSessionID: turn.sessionID, message: "Not connected to an ACP server. Check Connection settings and reconnect.")
+            return
+        }
+        do {
+            guard await ensureServerSession(for: turn.sessionID) else {
+                failTurn(localSessionID: turn.sessionID, message: "Could not create or resume the ACP session. Check the server logs in Settings → Logs.")
                 return
             }
-
-            var serverId = currentSession.serverSessionId
-            if serverId == nil {
-                do {
-                    serverId = try await client.createSession(
-                        cwd: validCwd,
-                        model: currentSession.modelId,
-                        mode: currentSession.mode,
-                        systemPrompt: self.settings.customSystemPrompt.isEmpty ? nil : self.settings.customSystemPrompt
-                    )
-                    if let newIdx = self.sessions.firstIndex(where: { $0.id == sId }) {
-                        self.sessions[newIdx].serverSessionId = serverId
-                    }
-                } catch {
-                    self.appendAssistantError(sessionId: sId, errorText: "Failed to initialize session: \(error.localizedDescription)")
-                    self.isGenerating = false
-                    return
-                }
-            }
-
-            do {
-                try await client.sendPrompt(
-                    sessionId: serverId ?? "default",
-                    text: text,
-                    model: currentSession.modelId,
-                    mode: currentSession.mode,
-                    effort: currentSession.reasoningEffort
-                )
-            } catch {
-                // A rejected prompt after an explicit stop is expected; the
-                // assistant row was already finalized optimistically above.
-                if self.isGenerating {
-                    self.appendAssistantError(sessionId: sId, errorText: "Turn failed: \(error.localizedDescription)")
-                    self.isGenerating = false
-                }
-            }
+            guard generatingSessionIDs.contains(turn.sessionID),
+                  let index = sessions.firstIndex(where: { $0.id == turn.sessionID }),
+                  let serverID = sessions[index].serverSessionId else { return }
+            try await client.sendPrompt(
+                sessionId: serverID,
+                text: turn.text,
+                model: turn.model,
+                mode: turn.mode,
+                effort: turn.effort
+            )
+        } catch {
+            failTurn(localSessionID: turn.sessionID, message: "Turn failed: \(error.localizedDescription)")
         }
     }
 
     public func cancelTurn() {
-        guard isGenerating else { return }
-        let serverId = activeSession?.serverSessionId
+        guard let selectedSessionId else { return }
+        cancelTurn(for: selectedSessionId)
+    }
 
-        // Stop the UI immediately. Network cancellation is best-effort and must
-        // never leave the composer stuck in a loading state if the server hangs.
-        isGenerating = false
-        finishActiveAssistantMessage(cancelled: true)
+    private func cancelTurn(for localSessionID: UUID) {
+        guard generatingSessionIDs.contains(localSessionID) else { return }
+        queuedTurns.removeAll { $0.sessionID == localSessionID }
+        let serverID = sessions.first(where: { $0.id == localSessionID })?.serverSessionId
+        let isActiveTurn = activeTurnQueueID == localSessionID
+        finishTurn(localSessionID: localSessionID, cancelled: true, advanceQueue: !isActiveTurn)
 
-        if let serverId {
-            Task { try? await client?.cancelTurn(sessionId: serverId) }
+        guard isActiveTurn else { return }
+        guard let serverID else {
+            activeTurnQueueID = nil
+            startNextTurnIfNeeded()
+            return
         }
+        Task {
+            try? await client?.cancelTurn(sessionId: serverID)
+            if self.activeTurnQueueID == localSessionID {
+                self.activeTurnQueueID = nil
+                self.startNextTurnIfNeeded()
+            }
+        }
+    }
+
+    private func failTurn(localSessionID: UUID, message: String) {
+        guard generatingSessionIDs.contains(localSessionID) else { return }
+        appendAssistantError(sessionId: localSessionID, errorText: message)
+        finishTurn(localSessionID: localSessionID, cancelled: false)
     }
 
     private func appendAssistantError(sessionId: UUID, errorText: String) {
-        guard let idx = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
-        if let lastIdx = sessions[idx].messages.indices.last, sessions[idx].messages[lastIdx].role == .assistant {
-            sessions[idx].messages[lastIdx].content += "\n\n⚠️ **Error:** \(errorText)"
-            sessions[idx].messages[lastIdx].isStreaming = false
-            sessions[idx].messages[lastIdx].thinkingState?.isThinking = false
+        guard let index = sessions.firstIndex(where: { $0.id == sessionId }),
+              let messageIndex = sessions[index].messages.indices.last,
+              sessions[index].messages[messageIndex].role == .assistant else { return }
+        sessions[index].messages[messageIndex].content += "\n\n⚠️ **Error:** \(errorText)"
+        sessions[index].messages[messageIndex].isStreaming = false
+        sessions[index].messages[messageIndex].thinkingState?.isThinking = false
+    }
+
+    private func finishTurn(localSessionID: UUID, cancelled: Bool, advanceQueue: Bool = true) {
+        guard generatingSessionIDs.remove(localSessionID) != nil,
+              let index = sessions.firstIndex(where: { $0.id == localSessionID }),
+              let messageIndex = sessions[index].messages.indices.last,
+              sessions[index].messages[messageIndex].role == .assistant else { return }
+        sessions[index].messages[messageIndex].isStreaming = false
+        if let start = sessions[index].messages[messageIndex].thinkingState?.startTime {
+            sessions[index].messages[messageIndex].thinkingState?.durationSeconds = Date().timeIntervalSince(start)
+        }
+        sessions[index].messages[messageIndex].thinkingState?.isThinking = false
+        if cancelled {
+            sessions[index].messages[messageIndex].content += "\n\n*(Generation stopped by user)*"
+        }
+        sessions[index].updatedAt = Date()
+        if advanceQueue, activeTurnQueueID == localSessionID {
+            activeTurnQueueID = nil
+            startNextTurnIfNeeded()
         }
     }
 
-    private func finishActiveAssistantMessage(cancelled: Bool) {
-        guard let sId = selectedSessionId, let idx = sessions.firstIndex(where: { $0.id == sId }) else { return }
-        guard let lastIdx = sessions[idx].messages.indices.last, sessions[idx].messages[lastIdx].role == .assistant else { return }
+    private func activeAssistantIndices(serverSessionID: String) -> (session: Int, message: Int)? {
+        guard let sessionIndex = localSessionIndex(serverSessionID: serverSessionID),
+              generatingSessionIDs.contains(sessions[sessionIndex].id),
+              let messageIndex = sessions[sessionIndex].messages.indices.last,
+              sessions[sessionIndex].messages[messageIndex].role == .assistant else { return nil }
+        return (sessionIndex, messageIndex)
+    }
 
-        sessions[idx].messages[lastIdx].isStreaming = false
-        if let start = sessions[idx].messages[lastIdx].thinkingState?.startTime {
-            sessions[idx].messages[lastIdx].thinkingState?.durationSeconds = Date().timeIntervalSince(start)
+    public func respondToPermission(_ request: PendingACPApproval, optionId: String) {
+        guard let client else { return }
+        Task {
+            do {
+                try await client.respondToPermission(request, optionId: optionId)
+                for sessionIndex in sessions.indices {
+                    for messageIndex in sessions[sessionIndex].messages.indices
+                    where sessions[sessionIndex].messages[messageIndex].pendingApproval?.requestId == request.requestId {
+                        sessions[sessionIndex].messages[messageIndex].pendingApproval = nil
+                    }
+                }
+            } catch {
+                appendLog("Failed to send permission response: \(error.localizedDescription)")
+            }
         }
-        sessions[idx].messages[lastIdx].thinkingState?.isThinking = false
-
-        if cancelled {
-            sessions[idx].messages[lastIdx].content += "\n\n*(Generation stopped by user)*"
-        }
-        sessions[idx].updatedAt = Date()
     }
 
     private func appendLog(_ log: String) {
         telemetryLogs.append("[\(Date().formatted(date: .omitted, time: .standard))] \(log)")
-        if telemetryLogs.count > 500 {
-            telemetryLogs.removeFirst(50)
-        }
+        if telemetryLogs.count > 500 { telemetryLogs.removeFirst(50) }
     }
 
-    // MARK: - ACPClientDelegate
+    // MARK: - ACP delegate. Every stream update is routed by server session ID,
+    // never by whichever conversation happens to be selected in the UI.
 
     nonisolated public func clientDidUpdateConnectionStatus(_ status: ServerConnectionStatus) {
+        Task { @MainActor in self.connectionStatus = status }
+    }
+
+    nonisolated public func clientDidReceiveThinkingStart(serverSessionId: String) {
         Task { @MainActor in
-            self.connectionStatus = status
+            guard let target = self.activeAssistantIndices(serverSessionID: serverSessionId) else { return }
+            self.sessions[target.session].messages[target.message].thinkingState = ThinkingState(isThinking: true, content: "", startTime: Date())
         }
     }
 
-    nonisolated public func clientDidReceiveThinkingStart() {
+    nonisolated public func clientDidReceiveThinkingChunk(_ text: String, serverSessionId: String) {
         Task { @MainActor in
-            guard let sId = self.selectedSessionId, let idx = self.sessions.firstIndex(where: { $0.id == sId }) else { return }
-            guard let lastIdx = self.sessions[idx].messages.indices.last, self.sessions[idx].messages[lastIdx].role == .assistant else { return }
-            self.sessions[idx].messages[lastIdx].thinkingState = ThinkingState(isThinking: true, content: "", startTime: Date())
-        }
-    }
-
-    nonisolated public func clientDidReceiveThinkingChunk(_ text: String) {
-        Task { @MainActor in
-            guard let sId = self.selectedSessionId, let idx = self.sessions.firstIndex(where: { $0.id == sId }) else { return }
-            guard let lastIdx = self.sessions[idx].messages.indices.last, self.sessions[idx].messages[lastIdx].role == .assistant else { return }
-
-            if self.sessions[idx].messages[lastIdx].thinkingState == nil {
-                self.sessions[idx].messages[lastIdx].thinkingState = ThinkingState(isThinking: true, content: "", startTime: Date())
+            guard let target = self.activeAssistantIndices(serverSessionID: serverSessionId) else { return }
+            if self.sessions[target.session].messages[target.message].thinkingState == nil {
+                self.sessions[target.session].messages[target.message].thinkingState = ThinkingState(isThinking: true, content: "", startTime: Date())
             }
-            self.sessions[idx].messages[lastIdx].thinkingState?.content += text
-
-            if let start = self.sessions[idx].messages[lastIdx].thinkingState?.startTime {
-                self.sessions[idx].messages[lastIdx].thinkingState?.durationSeconds = Date().timeIntervalSince(start)
-            }
+            self.sessions[target.session].messages[target.message].thinkingState?.content += text
         }
     }
 
-    nonisolated public func clientDidReceiveThinkingEnd() {
+    nonisolated public func clientDidReceiveThinkingEnd(serverSessionId: String) {
         Task { @MainActor in
-            guard let sId = self.selectedSessionId, let idx = self.sessions.firstIndex(where: { $0.id == sId }) else { return }
-            guard let lastIdx = self.sessions[idx].messages.indices.last, self.sessions[idx].messages[lastIdx].role == .assistant else { return }
-
-            if let start = self.sessions[idx].messages[lastIdx].thinkingState?.startTime {
-                self.sessions[idx].messages[lastIdx].thinkingState?.durationSeconds = Date().timeIntervalSince(start)
-            }
-            self.sessions[idx].messages[lastIdx].thinkingState?.isThinking = false
+            guard let target = self.activeAssistantIndices(serverSessionID: serverSessionId) else { return }
+            let start = self.sessions[target.session].messages[target.message].thinkingState?.startTime
+            self.sessions[target.session].messages[target.message].thinkingState?.durationSeconds = start.map { Date().timeIntervalSince($0) }
+            self.sessions[target.session].messages[target.message].thinkingState?.isThinking = false
         }
     }
 
-    nonisolated public func clientDidReceiveTextChunk(_ text: String) {
+    nonisolated public func clientDidReceiveTextChunk(_ text: String, serverSessionId: String) {
         Task { @MainActor in
-            guard let sId = self.selectedSessionId, let idx = self.sessions.firstIndex(where: { $0.id == sId }) else { return }
-            guard let lastIdx = self.sessions[idx].messages.indices.last, self.sessions[idx].messages[lastIdx].role == .assistant else { return }
-
-            // If thinking was still active, mark it finished
-            if self.sessions[idx].messages[lastIdx].thinkingState?.isThinking == true {
-                self.sessions[idx].messages[lastIdx].thinkingState?.isThinking = false
+            guard let target = self.activeAssistantIndices(serverSessionID: serverSessionId) else { return }
+            if self.sessions[target.session].messages[target.message].thinkingState?.isThinking == true {
+                self.sessions[target.session].messages[target.message].thinkingState?.isThinking = false
             }
-
-            self.sessions[idx].messages[lastIdx].content += text
+            self.sessions[target.session].messages[target.message].content += text
         }
     }
 
-    nonisolated public func clientDidUpdateToolCall(_ toolCall: ToolCallItem) {
+    nonisolated public func clientDidUpdateToolCall(_ toolCall: ToolCallItem, serverSessionId: String) {
         Task { @MainActor in
-            guard let sId = self.selectedSessionId, let idx = self.sessions.firstIndex(where: { $0.id == sId }) else { return }
-            guard let lastIdx = self.sessions[idx].messages.indices.last, self.sessions[idx].messages[lastIdx].role == .assistant else { return }
-
+            guard let target = self.activeAssistantIndices(serverSessionID: serverSessionId) else { return }
             var tool = toolCall
-            if let existingIdx = self.sessions[idx].messages[lastIdx].toolCalls.firstIndex(where: { $0.id == tool.id }) {
-                let prev = self.sessions[idx].messages[lastIdx].toolCalls[existingIdx]
-                tool.startedAt = prev.startedAt
+            let current = self.sessions[target.session].messages[target.message].toolCalls
+            if let existingIndex = current.firstIndex(where: { $0.id == tool.id }) {
+                let previous = current[existingIndex]
+                tool.startedAt = previous.startedAt
                 if tool.status == .success || tool.status == .failure {
                     tool.endedAt = Date()
-                    tool.durationMs = Int(Date().timeIntervalSince(prev.startedAt) * 1000)
+                    tool.durationMs = Int(Date().timeIntervalSince(previous.startedAt) * 1000)
                 }
-                self.sessions[idx].messages[lastIdx].toolCalls[existingIdx] = tool
+                self.sessions[target.session].messages[target.message].toolCalls[existingIndex] = tool
             } else {
-                self.sessions[idx].messages[lastIdx].toolCalls.append(tool)
+                self.sessions[target.session].messages[target.message].toolCalls.append(tool)
             }
         }
     }
 
-    nonisolated public func clientDidUpdatePlan(_ steps: [PlanStepItem]) {
+    nonisolated public func clientDidUpdatePlan(_ steps: [PlanStepItem], serverSessionId: String) {
         Task { @MainActor in
-            guard let sId = self.selectedSessionId, let idx = self.sessions.firstIndex(where: { $0.id == sId }) else { return }
-            guard let lastIdx = self.sessions[idx].messages.indices.last, self.sessions[idx].messages[lastIdx].role == .assistant else { return }
-            self.sessions[idx].messages[lastIdx].planSteps = steps
+            guard let target = self.activeAssistantIndices(serverSessionID: serverSessionId) else { return }
+            self.sessions[target.session].messages[target.message].planSteps = steps
         }
     }
 
-    nonisolated public func clientDidReceiveUsage(used: Int?, size: Int?) {
+    nonisolated public func clientDidReceiveUsage(used: Int?, size: Int?, serverSessionId: String) {
         Task { @MainActor in
-            guard let sId = self.selectedSessionId, let idx = self.sessions.firstIndex(where: { $0.id == sId }) else { return }
-            guard let lastIdx = self.sessions[idx].messages.indices.last, self.sessions[idx].messages[lastIdx].role == .assistant else { return }
-            if let used = used {
-                self.sessions[idx].messages[lastIdx].thinkingState?.tokenCount = used
-            }
+            guard let target = self.activeAssistantIndices(serverSessionID: serverSessionId) else { return }
+            if let used { self.sessions[target.session].messages[target.message].thinkingState?.tokenCount = used }
+        }
+    }
+
+    nonisolated public func clientDidRequestPermission(_ request: PendingACPApproval) {
+        Task { @MainActor in
+            guard let sessionIndex = self.localSessionIndex(serverSessionID: request.serverSessionId),
+                  let messageIndex = self.sessions[sessionIndex].messages.indices.last,
+                  self.sessions[sessionIndex].messages[messageIndex].role == .assistant else { return }
+            self.sessions[sessionIndex].messages[messageIndex].pendingApproval = request
         }
     }
 
@@ -384,16 +609,14 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
         }
     }
 
-    nonisolated public func clientDidCompleteTurn() {
+    nonisolated public func clientDidCompleteTurn(serverSessionId: String) {
         Task { @MainActor in
-            self.isGenerating = false
-            self.finishActiveAssistantMessage(cancelled: false)
+            guard let index = self.localSessionIndex(serverSessionID: serverSessionId) else { return }
+            self.finishTurn(localSessionID: self.sessions[index].id, cancelled: false)
         }
     }
 
     nonisolated public func clientDidReceiveStderrLog(_ log: String) {
-        Task { @MainActor in
-            self.appendLog(log)
-        }
+        Task { @MainActor in self.appendLog(log) }
     }
 }

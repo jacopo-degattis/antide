@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 public struct ChatView: View {
@@ -9,247 +10,204 @@ public struct ChatView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            // Top Navigation Bar
-            topBar
-
-            Divider().background(CodexTheme.border)
+            if let session = viewModel.activeSession, !session.messages.isEmpty {
+                conversationHeader(session)
+            } else {
+                Spacer().frame(height: 8)
+            }
 
             if let authUrl = viewModel.activeAuthURL {
                 authBanner(url: authUrl)
+                    .padding(.horizontal, 26)
+                    .padding(.top, 8)
             }
 
-            // Message Timeline
-            ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: true) {
-                    VStack(spacing: 12) {
+            if case .error(let message) = viewModel.connectionStatus {
+                connectionNotice(message)
+                    .padding(.horizontal, 26)
+                    .padding(.top, 8)
+            }
+
+            GeometryReader { geometry in
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
                         if let session = viewModel.activeSession {
                             if session.messages.isEmpty {
-                                emptyStateView
+                                emptyState
+                                    .frame(maxWidth: .infinity)
+                                    .frame(minHeight: geometry.size.height)
                             } else {
-                                ForEach(session.messages) { message in
-                                    MessageRowView(message: message)
-                                        .id(message.id)
+                                LazyVStack(spacing: 24) {
+                                    ForEach(session.messages) { message in
+                                        MessageRowView(message: message) { approval, optionId in
+                                            viewModel.respondToPermission(approval, optionId: optionId)
+                                        }
+                                            .frame(maxWidth: 790)
+                                            .frame(maxWidth: .infinity)
+                                            .id(message.id)
+                                    }
                                 }
+                                .padding(.top, 24)
+                                .padding(.bottom, 28)
+                                .frame(maxWidth: .infinity)
                             }
                         }
                     }
-                    .padding(.vertical, 16)
-                }
-                .onChange(of: viewModel.activeSession?.messages.count) { _, _ in
-                    scrollToBottom(proxy: proxy)
-                }
-                .onChange(of: viewModel.activeSession?.messages.last?.content) { _, _ in
-                    // Streaming text can update dozens of times per second; avoid
-                    // repeatedly restarting an animation for every token.
-                    scrollToBottom(proxy: proxy, animated: false)
-                }
-                .onChange(of: viewModel.activeSession?.messages.last?.toolCalls.count) { _, _ in
-                    scrollToBottom(proxy: proxy)
+                    .onChange(of: viewModel.activeSession?.messages.count) { _, _ in
+                        scrollToBottom(proxy: proxy)
+                    }
+                    .onChange(of: viewModel.activeSession?.messages.last?.content) { _, _ in
+                        scrollToBottom(proxy: proxy, animated: false)
+                    }
+                    .onChange(of: viewModel.activeSession?.messages.last?.toolCalls.count) { _, _ in
+                        scrollToBottom(proxy: proxy)
+                    }
                 }
             }
 
-            // Bottom Input Area
             InputBarView(viewModel: viewModel)
         }
-        .background(CodexTheme.background)
+        .background(CodexTheme.background.ignoresSafeArea())
     }
 
-    // MARK: - Subviews
+    private func conversationHeader(_ session: ChatSession) -> some View {
+        HStack(spacing: 9) {
+            Text(session.title)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(CodexTheme.primaryText)
+                .lineLimit(1)
 
-    private var topBar: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(viewModel.activeSession?.title ?? "Antigravity Codex")
-                    .font(.system(size: 13.5, weight: .bold))
-                    .foregroundColor(CodexTheme.primaryText)
-                    .lineLimit(1)
-
-                if let path = viewModel.activeSession?.workspacePath {
-                    Text(path)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(CodexTheme.tertiaryText)
-                        .lineLimit(1)
-                }
-            }
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(CodexTheme.tertiaryText)
 
             Spacer()
 
-            // Mode & Model Indicators
-            if let session = viewModel.activeSession {
-                HStack(spacing: 6) {
-                    Label(session.mode.title, systemImage: session.mode.systemSymbol)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(CodexTheme.secondaryText)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(CodexTheme.surfaceHighlight.opacity(0.5))
-                        .cornerRadius(5)
+            Text(session.workspacePath.isEmpty ? "General chat" : URL(fileURLWithPath: session.workspacePath).lastPathComponent)
+                .font(.system(size: 11.5))
+                .foregroundStyle(CodexTheme.secondaryText)
+                .lineLimit(1)
 
-                    Text(session.modelId)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(CodexTheme.secondaryText)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(CodexTheme.surfaceHighlight.opacity(0.5))
-                        .cornerRadius(5)
-                }
-            }
-
-            // Clear chat button
             Button {
                 clearCurrentSessionMessages()
             } label: {
                 Image(systemName: "arrow.counterclockwise")
                     .font(.system(size: 12))
-                    .foregroundColor(CodexTheme.tertiaryText)
-                    .padding(6)
-                    .background(CodexTheme.surfaceHighlight.opacity(0.5))
-                    .cornerRadius(6)
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help("Clear messages in current chat")
+            .help("Clear conversation")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(CodexTheme.secondaryBackground.opacity(0.8))
+        .padding(.horizontal, 25)
+        .frame(height: 42)
+        .overlay(alignment: .bottom) { Rectangle().fill(CodexTheme.border).frame(height: 1) }
     }
 
-    private var emptyStateView: some View {
-        VStack(spacing: 16) {
-            Spacer(minLength: 40)
+    private var emptyState: some View {
+        VStack(spacing: 19) {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 27, weight: .light))
+                .foregroundStyle(CodexTheme.tertiaryText)
+                .frame(width: 54, height: 54)
+                .overlay(Circle().strokeBorder(CodexTheme.border, lineWidth: 1))
 
-            ZStack {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [CodexTheme.accentPurple.opacity(0.2), CodexTheme.accentBlue.opacity(0.2)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 56, height: 56)
-
-                Image(systemName: "sparkles")
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(CodexTheme.thinkingGradient)
+            HStack(spacing: 5) {
+                if hasTargetWorkspace {
+                    Text("What should we build in")
+                        .foregroundStyle(CodexTheme.primaryText)
+                    Button(workspaceName) {
+                        chooseWorkspace()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(CodexTheme.primaryText)
+                    .underline(true, color: CodexTheme.tertiaryText)
+                    .help("Choose a project workspace")
+                    Text("?")
+                        .foregroundStyle(CodexTheme.primaryText)
+                } else {
+                    Text("What can I help you with?")
+                        .foregroundStyle(CodexTheme.primaryText)
+                }
             }
-
-            VStack(spacing: 6) {
-                Text("Antigravity Autonomous Agent")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(CodexTheme.primaryText)
-
-                Text("Powered by refined-antigravity-acp and Google's agy CLI")
-                    .font(.system(size: 12.5))
-                    .foregroundColor(CodexTheme.secondaryText)
-            }
-
-            // Quick suggestion prompts
-            VStack(spacing: 8) {
-                suggestionButton(
-                    title: "Inspect workspace status and agy CLI version",
-                    icon: "terminal"
-                )
-                suggestionButton(
-                    title: "Analyze project architecture and generate execution plan",
-                    icon: "list.clipboard"
-                )
-                suggestionButton(
-                    title: "Check git modified files and review pending changes",
-                    icon: "doc.badge.gearshape"
-                )
-            }
-            .frame(maxWidth: 420)
-            .padding(.top, 8)
-
-            Spacer(minLength: 40)
+            .font(.system(size: 25, weight: .regular))
+            .multilineTextAlignment(.center)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 24)
+        .offset(y: -24)
+        .animation(.easeOut(duration: 0.22), value: workspaceName)
     }
 
     private func authBanner(url: URL) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: "lock.shield.fill")
-                .foregroundColor(CodexTheme.accentBlue)
-                .font(.system(size: 16))
-
+        HStack(spacing: 10) {
+            Image(systemName: "lock.shield")
+                .foregroundStyle(CodexTheme.accentAmber)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Google Account Authentication Required")
+                Text("Sign in to Antigravity")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(CodexTheme.primaryText)
-                Text("The ACP server opened a browser page to sign in with Google.")
+                    .foregroundStyle(CodexTheme.primaryText)
+                Text("The ACP server requires Google account authentication.")
                     .font(.system(size: 11))
-                    .foregroundColor(CodexTheme.secondaryText)
+                    .foregroundStyle(CodexTheme.secondaryText)
             }
-
             Spacer()
-
-            Button(action: {
-                #if canImport(AppKit)
-                NSWorkspace.shared.open(url)
-                #endif
-            }) {
-                Text("Open Sign-In Page")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(CodexTheme.accentBlue)
-                    .foregroundColor(.white)
-                    .cornerRadius(6)
-            }
-            .buttonStyle(.plain)
-
-            Button(action: {
+            Button("Open sign-in") { NSWorkspace.shared.open(url) }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            Button {
                 viewModel.activeAuthURL = nil
-            }) {
+            } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(CodexTheme.tertiaryText)
+                    .foregroundStyle(CodexTheme.tertiaryText)
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(CodexTheme.accentBlue.opacity(0.12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(CodexTheme.accentBlue.opacity(0.3), lineWidth: 1)
-        )
-        .cornerRadius(8)
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
+        .padding(11)
+        .background(CodexTheme.surface, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(CodexTheme.border))
     }
 
-    private func suggestionButton(title: String, icon: String) -> some View {
-        Button {
-            viewModel.inputText = title
-            viewModel.sendCurrentPrompt()
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 12))
-                    .foregroundColor(CodexTheme.accentBlue)
-
-                Text(title)
-                    .font(.system(size: 12.5))
-                    .foregroundColor(CodexTheme.secondaryText)
-
-                Spacer()
-
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 10))
-                    .foregroundColor(CodexTheme.tertiaryText)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(CodexTheme.surface.opacity(0.7))
-            .cornerRadius(6)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(CodexTheme.border, lineWidth: 1)
-            )
+    private func connectionNotice(_ message: String) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: "exclamationmark.circle")
+                .foregroundStyle(CodexTheme.accentAmber)
+            Text(message)
+                .font(.system(size: 11.5))
+                .foregroundStyle(CodexTheme.secondaryText)
+                .lineLimit(2)
+            Spacer(minLength: 4)
+            Button("Reconnect") { Task { await viewModel.reconnect() } }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(CodexTheme.surface.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var hasTargetWorkspace: Bool {
+        guard let path = viewModel.activeSession?.workspacePath else { return false }
+        return !path.isEmpty
+    }
+
+    private var workspaceName: String {
+        guard let path = viewModel.activeSession?.workspacePath, !path.isEmpty else { return "General chat" }
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return name.isEmpty ? "Workspace" : name
+    }
+
+    private func chooseWorkspace() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url,
+           let id = viewModel.selectedSessionId {
+            let workspace = viewModel.addWorkspace(at: url.path)
+            viewModel.moveSession(id, toWorkspacePath: workspace.path)
+        }
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = true) {
@@ -264,8 +222,8 @@ public struct ChatView: View {
     }
 
     private func clearCurrentSessionMessages() {
-        guard let sId = viewModel.selectedSessionId,
-              let idx = viewModel.sessions.firstIndex(where: { $0.id == sId }) else { return }
-        viewModel.sessions[idx].messages.removeAll()
+        guard let id = viewModel.selectedSessionId,
+              let index = viewModel.sessions.firstIndex(where: { $0.id == id }) else { return }
+        viewModel.sessions[index].messages.removeAll()
     }
 }
