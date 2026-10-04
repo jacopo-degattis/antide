@@ -7,8 +7,8 @@ public struct ToolCallCardView: View {
 
     public init(item: ToolCallItem) {
         self.item = item
-        // Start expanded if running or failed
-        self._isExpanded = State(initialValue: item.status == .running || item.status == .failure)
+        // Keep completed calls compact; expand live calls to show their progress.
+        self._isExpanded = State(initialValue: item.status == .running)
     }
 
     public var body: some View {
@@ -94,7 +94,26 @@ public struct ToolCallCardView: View {
                     }
 
                     if selectedTab == 0 || (item.outputFormatted == nil && item.errorMessage == nil) {
-                        if !item.inputFormatted.isEmpty {
+                        if let fileName = item.inputFileName, let fileContent = item.inputFileContent {
+                            VStack(alignment: .leading, spacing: 0) {
+                                HStack(spacing: 7) {
+                                    Image(systemName: "doc.text")
+                                        .foregroundStyle(CodexTheme.accentBlue)
+                                    Text(URL(fileURLWithPath: fileName).lastPathComponent)
+                                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(CodexTheme.primaryText)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(CodexTheme.surface)
+                                .help(fileName)
+
+                                CodeBlockView(code: fileContent, language: URL(fileURLWithPath: fileName).pathExtension)
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                        } else if !item.inputFormatted.isEmpty {
                             CodeBlockView(
                                 code: item.inputFormatted,
                                 language: item.kind == "bash" ? "bash" : "json"
@@ -142,6 +161,16 @@ public struct ToolCallCardView: View {
             RoundedRectangle(cornerRadius: 7)
                 .stroke(cardBorderColor, lineWidth: 1)
         )
+        .onChange(of: item.status) { _, newStatus in
+            // Running calls open to show live details; once complete, return to
+            // a compact row so a long turn does not leave every finished step open.
+            if newStatus == .success || newStatus == .failure {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    isExpanded = false
+                    selectedTab = 0
+                }
+            }
+        }
     }
 
     private func tabButton(title: String, index: Int) -> some View {

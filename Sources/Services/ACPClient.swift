@@ -193,7 +193,9 @@ public final class ACPClient: @unchecked Sendable {
         model: String?,
         mode: ExecutionMode?,
         effort: ReasoningEffort?,
-        responseTimeout: Duration = .seconds(300)
+        // Coding turns can outlast the old five-minute cutoff. Paseo similarly
+        // allows ten minutes for a turn to finish before treating it as stuck.
+        responseTimeout: Duration = .seconds(600)
     ) async throws {
         let promptParams = ACPSessionPromptParams(
             sessionId: sessionId,
@@ -219,7 +221,7 @@ public final class ACPClient: @unchecked Sendable {
             let sessionId: String
         }
         let req = JSONRPCRequest(method: "session/cancel", params: CancelParams(sessionId: sessionId))
-        _ = try? await sendRequest(req)
+        _ = try? await sendRequest(req, timeout: .seconds(5))
     }
 
     // MARK: - Private Request / Response Matching
@@ -323,14 +325,24 @@ public final class ACPClient: @unchecked Sendable {
 
     private func handleServerRequest(_ message: RawInboundMessage) async {
         guard let requestID = message.id, let method = message.method else { return }
-        if method == "session/request_permission",
-           let params = message.params?.dictionaryValue,
-           let sessionId = params["sessionId"]?.stringValue {
+        // Antigravity has emitted both the canonical snake_case method and a
+        // camelCase variant; treat both as ACP permission requests.
+        if method == "session/request_permission" || method == "session/requestPermission",
+           let params = message.params?.dictionaryValue {
+            let sessionId = params["sessionId"]?.stringValue ?? params["session_id"]?.stringValue ?? ""
             let tool = params["toolCall"]?.dictionaryValue ?? [:]
-            let options = (params["options"]?.arrayValue ?? []).compactMap { value -> ACPPermissionOption? in
+            let optionValues = params["options"]?.arrayValue
+                ?? params["permissionOptions"]?.arrayValue
+                ?? params["permission_options"]?.arrayValue
+                ?? tool["options"]?.arrayValue
+                ?? []
+            let options = optionValues.compactMap { value -> ACPPermissionOption? in
+                if let optionName = value.stringValue {
+                    return ACPPermissionOption(optionId: optionName, name: optionName, kind: nil)
+                }
                 guard let option = value.dictionaryValue,
-                      let optionId = option["optionId"]?.stringValue,
-                      let name = option["name"]?.stringValue else { return nil }
+                      let optionId = option["optionId"]?.stringValue ?? option["id"]?.stringValue else { return nil }
+                let name = option["name"]?.stringValue ?? option["label"]?.stringValue ?? optionId
                 return ACPPermissionOption(optionId: optionId, name: name, kind: option["kind"]?.stringValue)
             }
             let permission = PendingACPApproval(
@@ -341,7 +353,21 @@ public final class ACPClient: @unchecked Sendable {
                 title: tool["title"]?.stringValue ?? params["title"]?.stringValue ?? "Allow this action?",
                 options: options
             )
-            delegate?.clientDidRequestPermission(permission)
+
+            // Respond on the ACP listener itself. Routing this through a UI task
+            // can leave tool calls such as client_create_file pending while the
+            // main actor is busy updating the transcript.
+            if let option = Self.yoloPermissionOption(options) {
+                do {
+                    try await respondToPermission(permission, optionId: option.optionId)
+                    delegate?.clientDidReceiveStderrLog("YOLO approved ‘\(permission.title)’ using ‘\(option.name)’.")
+                } catch {
+                    delegate?.clientDidReceiveStderrLog("YOLO approval failed for ‘\(permission.title)’: \(error.localizedDescription)")
+                }
+            } else {
+                await sendPermissionCancelled(id: requestID, numericID: message.idIsNumeric)
+                delegate?.clientDidReceiveStderrLog("Cancelled ACP permission request ‘\(permission.title)’ because the server supplied no usable options.")
+            }
             return
         }
 
@@ -360,6 +386,43 @@ public final class ACPClient: @unchecked Sendable {
             try? await transport.send(data: data)
         }
         delegate?.clientDidReceiveStderrLog("Unsupported ACP server request: \\(method)")
+    }
+
+    private static func yoloPermissionOption(_ options: [ACPPermissionOption]) -> ACPPermissionOption? {
+        options.sorted { lhs, rhs in
+            permissionOptionRank(lhs) < permissionOptionRank(rhs)
+        }.first
+    }
+
+    private static func permissionOptionRank(_ option: ACPPermissionOption) -> Int {
+        let kind = option.kind ?? ""
+        let description = "\(option.optionId) \(option.name) \(kind)".lowercased()
+        if description.contains("reject") || description.contains("deny") || description.contains("cancel")
+            || description.contains("never") || description.contains("disallow") || description.contains("block") {
+            return 3
+        }
+        if description.contains("allow") || description.contains("approve") || description.contains("accept") {
+            return description.contains("always") ? 0 : 1
+        }
+        if description.contains("proceed") || description.contains("continue") || description.contains("yes") {
+            return 1
+        }
+        return 2
+    }
+
+    private func sendPermissionCancelled(id: String, numericID: Bool) async {
+        let requestID: Any = numericID ? (Int64(id) as Any? ?? id) : id
+        let payload: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": requestID,
+            "result": ["outcome": ["outcome": "cancelled"]]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        do {
+            try await transport.send(data: data)
+        } catch {
+            delegate?.clientDidReceiveStderrLog("Could not close ACP permission request: \(error.localizedDescription)")
+        }
     }
 
     private func handleFilesystemRequest(_ message: RawInboundMessage, method: String) async {
@@ -555,11 +618,18 @@ public final class ACPClient: @unchecked Sendable {
         }
 
         var inputStr = ""
+        var inputFileName: String?
+        var inputFileContent: String?
         if let input = dict["input"] ?? dict["rawInput"] {
             if let str = input.stringValue {
                 inputStr = str
             } else if let subDict = input.dictionaryValue {
-                if let cmd = subDict["command"]?.stringValue {
+                if let fileName = subDict["target_file"]?.stringValue ?? subDict["file_path"]?.stringValue,
+                   let codeContent = subDict["code_content"]?.stringValue {
+                    inputFileName = fileName
+                    inputFileContent = codeContent
+                    inputStr = "\(fileName)\n\n\(codeContent)"
+                } else if let cmd = subDict["command"]?.stringValue {
                     inputStr = cmd
                 } else if let path = subDict["path"]?.stringValue {
                     inputStr = path
@@ -584,6 +654,10 @@ public final class ACPClient: @unchecked Sendable {
             }
         }
 
+        if status == .pending {
+            delegate?.clientDidReceiveStderrLog("ACP tool call is pending: ‘\(title)’ (\(callId), kind: \(kind)).")
+        }
+
         let item = ToolCallItem(
             id: callId,
             name: title,
@@ -591,6 +665,8 @@ public final class ACPClient: @unchecked Sendable {
             status: status,
             inputFormatted: inputStr,
             outputFormatted: outputStr,
+            inputFileName: inputFileName,
+            inputFileContent: inputFileContent,
             errorMessage: dict["error"]?.stringValue
         )
 

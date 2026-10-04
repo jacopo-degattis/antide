@@ -156,13 +156,12 @@ public struct SettingsView: View {
                         Text(effort.title).tag(effort)
                     }
                 }
-                Picker("Approval behavior", selection: $settings.defaultMode) {
-                    ForEach(ExecutionMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
+                LabeledContent("Execution mode") {
+                    Label("YOLO — approve tools and commands automatically", systemImage: ExecutionMode.yolo.systemSymbol)
+                        .foregroundStyle(CodexTheme.accentAmber)
                 }
             } header: {
-                settingsSectionHeader("Agent defaults", subtitle: "Used for new conversations. You can change these per chat.")
+                settingsSectionHeader("Agent defaults", subtitle: "Model and reasoning effort are used for new conversations. YOLO mode is always enabled.")
             }
 
             Section {

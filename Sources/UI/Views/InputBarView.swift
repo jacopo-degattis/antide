@@ -26,7 +26,7 @@ public struct InputBarView: View {
 
                 HStack(spacing: 7) {
                     attachmentMenu
-                    modePicker
+                    yoloBadge
                     Spacer(minLength: 8)
                     modelPicker
                     effortPicker
@@ -162,43 +162,24 @@ public struct InputBarView: View {
         .help("Add context")
     }
 
-    private var modePicker: some View {
-        Menu {
-            ForEach(ExecutionMode.allCases) { mode in
-                Button {
-                    if let index = activeSessionIndex { viewModel.sessions[index].mode = mode }
-                } label: {
-                    if currentMode == mode {
-                        Label(mode.title, systemImage: "checkmark")
-                    } else {
-                        Label(mode.title, systemImage: mode.systemSymbol)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: currentMode.systemSymbol)
-                    .font(.system(size: 11))
-                Text(currentMode == .default ? "Approve for me" : currentMode.title)
-                    .font(.system(size: 11.5, weight: .medium))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(CodexTheme.tertiaryText)
-            }
-            .foregroundStyle(CodexTheme.secondaryText)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
-            .contentShape(Capsule())
+    private var yoloBadge: some View {
+        HStack(spacing: 6) {
+            Image(systemName: ExecutionMode.yolo.systemSymbol)
+                .font(.system(size: 11))
+            Text("YOLO")
+                .font(.system(size: 11.5, weight: .semibold))
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Choose how the agent handles approvals")
+        .foregroundStyle(CodexTheme.accentAmber)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .help("YOLO mode: tool and command permissions are accepted automatically")
     }
 
     private var modelPicker: some View {
         Menu {
             ForEach(ModelOption.standardModels) { model in
                 Button {
+                    SettingsManager.shared.defaultModel = model.id
                     if let index = activeSessionIndex { viewModel.sessions[index].modelId = model.id }
                 } label: {
                     if currentModel == model.id {
@@ -231,6 +212,7 @@ public struct InputBarView: View {
         Menu {
             ForEach(ReasoningEffort.allCases) { effort in
                 Button {
+                    SettingsManager.shared.defaultEffort = effort
                     if let index = activeSessionIndex { viewModel.sessions[index].reasoningEffort = effort }
                 } label: {
                     if currentEffort == effort {
@@ -280,9 +262,8 @@ public struct InputBarView: View {
         .help(viewModel.isGenerating ? "Stop generation (⌘.)" : "Send message (Return)")
     }
 
-    private var currentMode: ExecutionMode { viewModel.activeSession?.mode ?? .default }
-    private var currentModel: String { viewModel.activeSession?.modelId ?? "gemini-3.1-pro" }
-    private var currentEffort: ReasoningEffort { viewModel.activeSession?.reasoningEffort ?? .high }
+    private var currentModel: String { viewModel.activeSession?.modelId ?? SettingsManager.shared.defaultModel }
+    private var currentEffort: ReasoningEffort { viewModel.activeSession?.reasoningEffort ?? SettingsManager.shared.defaultEffort }
     private var activeSessionIndex: Int? {
         guard let id = viewModel.selectedSessionId else { return nil }
         return viewModel.sessions.firstIndex(where: { $0.id == id })

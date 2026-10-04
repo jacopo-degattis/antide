@@ -11,7 +11,6 @@ private struct QueuedTurn {
     let sessionID: UUID
     let text: String
     let model: String
-    let mode: ExecutionMode
     let effort: ReasoningEffort
 }
 
@@ -55,6 +54,9 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
         let archive = Self.loadArchive(from: archiveFileURL)
         sessions = archive?.sessions ?? []
         selectedSessionId = archive?.selectedSessionId
+        // YOLO is the sole execution mode. Normalize archived sessions created
+        // by older versions so they also resume without approval prompts.
+        for index in sessions.indices { sessions[index].mode = .yolo }
 
         // A permission dialog or turn cannot survive the server process. Restore
         // the transcript, but close transient activity indicators cleanly.
@@ -106,7 +108,7 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
         guard sessions.isEmpty else { return }
         let session = ChatSession(
             title: "New Chat",
-            mode: settings.defaultMode,
+            mode: .yolo,
             modelId: settings.defaultModel,
             reasoningEffort: settings.defaultEffort,
             workspacePath: ""
@@ -122,7 +124,7 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
         let path = workspacePath.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? ""
         let session = ChatSession(
             title: "New Chat",
-            mode: settings.defaultMode,
+            mode: .yolo,
             modelId: settings.defaultModel,
             reasoningEffort: settings.defaultEffort,
             workspacePath: path
@@ -312,7 +314,7 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
                     sessionId: serverID,
                     cwd: cwd,
                     model: snapshot.modelId,
-                    mode: snapshot.mode,
+                    mode: .yolo,
                     systemPrompt: prompt
                 )
                 guard let index = sessions.firstIndex(where: { $0.id == localSessionID }),
@@ -333,7 +335,7 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
             let serverID = try await client.createSession(
                 cwd: cwd,
                 model: snapshot.modelId,
-                mode: snapshot.mode,
+                mode: .yolo,
                 systemPrompt: prompt
             )
             guard let index = sessions.firstIndex(where: { $0.id == localSessionID }),
@@ -382,7 +384,6 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
             sessionID: localID,
             text: text,
             model: snapshot.modelId,
-            mode: snapshot.mode,
             effort: snapshot.reasoningEffort
         ))
         startNextTurnIfNeeded()
@@ -401,6 +402,7 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
     }
 
     private func runTurn(_ turn: QueuedTurn) async {
+        var serverSessionID: String?
         guard let client else {
             failTurn(localSessionID: turn.sessionID, message: "Not connected to an ACP server. Check Connection settings and reconnect.")
             return
@@ -413,14 +415,20 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
             guard generatingSessionIDs.contains(turn.sessionID),
                   let index = sessions.firstIndex(where: { $0.id == turn.sessionID }),
                   let serverID = sessions[index].serverSessionId else { return }
+            serverSessionID = serverID
             try await client.sendPrompt(
                 sessionId: serverID,
                 text: turn.text,
                 model: turn.model,
-                mode: turn.mode,
+                mode: .yolo,
                 effort: turn.effort
             )
         } catch {
+            let nsError = error as NSError
+            if nsError.domain == "ACPClient", nsError.code == -2, let serverSessionID {
+                appendLog("Prompt timed out; cancelling the still-active ACP turn.")
+                try? await client.cancelTurn(sessionId: serverSessionID)
+            }
             failTurn(localSessionID: turn.sessionID, message: "Turn failed: \(error.localizedDescription)")
         }
     }
@@ -595,11 +603,29 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
 
     nonisolated public func clientDidRequestPermission(_ request: PendingACPApproval) {
         Task { @MainActor in
-            guard let sessionIndex = self.localSessionIndex(serverSessionID: request.serverSessionId),
-                  let messageIndex = self.sessions[sessionIndex].messages.indices.last,
-                  self.sessions[sessionIndex].messages[messageIndex].role == .assistant else { return }
-            self.sessions[sessionIndex].messages[messageIndex].pendingApproval = request
+            // In YOLO mode, choose an allow option automatically instead of
+            // interrupting the turn with an approval card.
+            let rankedOptions = request.options.sorted { lhs, rhs in
+                Self.permissionOptionRank(lhs) < Self.permissionOptionRank(rhs)
+            }
+            guard let option = rankedOptions.first else {
+                self.appendLog("YOLO could not respond to permission request ‘\(request.title)’: no options were provided.")
+                return
+            }
+            self.respondToPermission(request, optionId: option.optionId)
         }
+    }
+
+    private nonisolated static func permissionOptionRank(_ option: ACPPermissionOption) -> Int {
+        let kind = option.kind ?? ""
+        let description = "\(option.optionId) \(option.name) \(kind)".lowercased()
+        if description.contains("allow") || description.contains("approve") || description.contains("accept") {
+            return description.contains("always") ? 0 : 1
+        }
+        if description.contains("reject") || description.contains("deny") || description.contains("cancel") {
+            return 3
+        }
+        return 2
     }
 
     nonisolated public func clientDidRequireAuthentication(url: URL) {

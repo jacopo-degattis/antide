@@ -26,7 +26,7 @@ public enum ServerConnectionStatus: Equatable, Sendable {
 // MARK: - Execution Modes
 
 public enum ExecutionMode: String, CaseIterable, Identifiable, Codable, Sendable {
-    case `default` = "default"
+    case `default` = "default" // Kept for decoding older saved sessions.
     case autoEdit = "auto_edit"
     case yolo = "yolo"
     case plan = "plan"
@@ -123,6 +123,9 @@ public struct ToolCallItem: Identifiable, Codable, Sendable, Equatable {
     public var status: ToolCallStatus
     public var inputFormatted: String
     public var outputFormatted: String?
+    /// Structured file-edit input, rendered with a filename header and source body.
+    public var inputFileName: String?
+    public var inputFileContent: String?
     public var errorMessage: String?
     public var startedAt: Date
     public var endedAt: Date?
@@ -135,6 +138,8 @@ public struct ToolCallItem: Identifiable, Codable, Sendable, Equatable {
         status: ToolCallStatus = .running,
         inputFormatted: String = "",
         outputFormatted: String? = nil,
+        inputFileName: String? = nil,
+        inputFileContent: String? = nil,
         errorMessage: String? = nil,
         startedAt: Date = Date(),
         endedAt: Date? = nil,
@@ -146,6 +151,8 @@ public struct ToolCallItem: Identifiable, Codable, Sendable, Equatable {
         self.status = status
         self.inputFormatted = inputFormatted
         self.outputFormatted = outputFormatted
+        self.inputFileName = inputFileName
+        self.inputFileContent = inputFileContent
         self.errorMessage = errorMessage
         self.startedAt = startedAt
         self.endedAt = endedAt
@@ -335,7 +342,7 @@ public struct ChatSession: Identifiable, Codable, Sendable, Equatable {
         updatedAt: Date = Date(),
         messages: [ChatMessage] = [],
         serverSessionId: String? = nil,
-        mode: ExecutionMode = .default,
+        mode: ExecutionMode = .yolo,
         modelId: String = "gemini-3.1-pro",
         reasoningEffort: ReasoningEffort = .high,
         workspacePath: String = FileManager.default.currentDirectoryPath

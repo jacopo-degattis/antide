@@ -59,7 +59,6 @@ public final class SettingsManager: ObservableObject {
 
     // Agent Defaults
     @AppStorage("defaultModel") public var defaultModel: String = "gemini-3.1-pro"
-    @AppStorage("defaultMode") public var defaultMode: ExecutionMode = .default
     @AppStorage("defaultEffort") public var defaultEffort: ReasoningEffort = .high
     @AppStorage("customSystemPrompt") public var customSystemPrompt: String = ""
 
