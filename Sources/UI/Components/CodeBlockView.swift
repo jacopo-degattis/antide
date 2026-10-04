@@ -17,11 +17,11 @@ public struct CodeBlockView: View {
             HStack {
                 if let lang = language, !lang.isEmpty {
                     Text(lang.uppercased())
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))     // Increased (was 11)
                         .foregroundColor(CodexTheme.secondaryText)
                 } else {
                     Text("CODE")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))     // Increased (was 11)
                         .foregroundColor(CodexTheme.secondaryText)
                 }
 
@@ -41,9 +41,9 @@ public struct CodeBlockView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))          // Increased (was 10)
                         Text(copied ? "Copied" : "Copy")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: 12, weight: .medium))    // Increased (was 11)
                     }
                     .foregroundColor(copied ? CodexTheme.accentGreen : CodexTheme.secondaryText)
                     .padding(.horizontal, 6)
@@ -62,7 +62,7 @@ public struct CodeBlockView: View {
             // Content
             ScrollView(.horizontal, showsIndicators: true) {
                 Text(code)
-                    .font(.system(size: 12.5, design: .monospaced))
+                    .font(.system(size: 13.5, design: .monospaced))    // Increased (was 12.5)
                     .foregroundColor(CodexTheme.primaryText)
                     .textSelection(.enabled)
                     .padding(10)

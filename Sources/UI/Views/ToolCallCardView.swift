@@ -27,7 +27,7 @@ public struct ToolCallCardView: View {
                             .frame(width: 24, height: 24)
 
                         Image(systemName: item.sfSymbol)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold))            // Increased (was 11)
                             .foregroundColor(toolIconColor)
                     }
 
@@ -35,11 +35,11 @@ public struct ToolCallCardView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 6) {
                             Text(item.name)
-                                .font(.system(size: 12.5, weight: .semibold))
+                                .font(.system(size: 13.5, weight: .semibold))      // Increased (was 12.5)
                                 .foregroundColor(CodexTheme.primaryText)
 
                             Text(item.kind.uppercased())
-                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                .font(.system(size: 10.5, weight: .bold, design: .monospaced))        // Increased (was 9.5)
                                 .foregroundColor(CodexTheme.tertiaryText)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1)
@@ -49,7 +49,7 @@ public struct ToolCallCardView: View {
 
                         if !item.inputFormatted.isEmpty && !isExpanded {
                             Text(item.inputFormatted.components(separatedBy: .newlines).first ?? "")
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 12, design: .monospaced))                         // Increased (was 11)
                                 .foregroundColor(CodexTheme.secondaryText)
                                 .lineLimit(1)
                         }
@@ -61,14 +61,14 @@ public struct ToolCallCardView: View {
                     HStack(spacing: 6) {
                         if let ms = item.durationMs {
                             Text("\(ms)ms")
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 12, design: .monospaced))                          // Increased (was 11)
                                 .foregroundColor(CodexTheme.tertiaryText)
                         }
 
                         statusBadge
 
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 11, weight: .bold))                  // Increased (was 10)
                             .foregroundColor(CodexTheme.tertiaryText)
                     }
                 }

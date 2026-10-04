@@ -20,12 +20,12 @@ public struct ThinkingView: View {
                     .blur(radius: state.isThinking && glow ? 5 : 2)
 
                 Image(systemName: "sparkle")
-                    .font(.system(size: 10.5, weight: .semibold))
+                    .font(.system(size: 11.5, weight: .semibold))       // Increased (was 10.5)
                     .foregroundStyle(state.isThinking ? CodexTheme.accentBlue : CodexTheme.tertiaryText)
             }
 
             Text(state.isThinking ? "Thinking" : "Thought")
-                .font(.system(size: 12.5, weight: .medium))
+                .font(.system(size: 13.5, weight: .medium))             // Increased (was 12.5)
                 .foregroundStyle(state.isThinking ? CodexTheme.primaryText : CodexTheme.secondaryText)
                 .shadow(
                     color: state.isThinking ? CodexTheme.accentBlue.opacity(glow ? 0.48 : 0.08) : .clear,
@@ -42,7 +42,7 @@ public struct ThinkingView: View {
                 }
             } else if let duration = state.durationSeconds, duration > 0 {
                 Text(String(format: "%.1fs", duration))
-                    .font(.system(size: 10.5, design: .monospaced))
+                    .font(.system(size: 11.5, design: .monospaced))      // Increased (was 10.5)
                     .foregroundStyle(CodexTheme.tertiaryText)
             }
         }

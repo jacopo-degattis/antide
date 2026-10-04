@@ -25,18 +25,18 @@ public struct PlanTimelineView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "checklist")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 14, weight: .semibold))            // Increased (was 13)
                             .foregroundColor(CodexTheme.accentBlue)
 
                         Text("Autonomous Plan")
-                            .font(.system(size: 12.5, weight: .semibold))
+                            .font(.system(size: 13.5, weight: .semibold))          // Increased (was 12.5)
                             .foregroundColor(CodexTheme.primaryText)
 
                         Spacer()
 
                         // Progress count pill
                         Text("\(completedCount)/\(steps.count) Done")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))        // Increased (was 11)
                             .foregroundColor(completedCount == steps.count ? CodexTheme.accentGreen : CodexTheme.secondaryText)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -44,7 +44,7 @@ public struct PlanTimelineView: View {
                             .cornerRadius(4)
 
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 11, weight: .bold))                // Increased (was 10)
                             .foregroundColor(CodexTheme.tertiaryText)
                     }
                     .padding(.horizontal, 10)
@@ -76,12 +76,12 @@ public struct PlanTimelineView: View {
                                 // Step details
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(step.title)
-                                        .font(.system(size: 12.5, weight: step.status == .running ? .semibold : .medium))
+                                        .font(.system(size: 13.5, weight: step.status == .running ? .semibold : .medium))      // Increased (was 12.5)
                                         .foregroundColor(step.status == .running ? CodexTheme.primaryText : CodexTheme.secondaryText)
 
                                     if let desc = step.description, !desc.isEmpty {
                                         Text(desc)
-                                            .font(.system(size: 11.5))
+                                            .font(.system(size: 12.5))                // Increased (was 11.5)
                                             .foregroundColor(CodexTheme.tertiaryText)
                                     }
                                 }

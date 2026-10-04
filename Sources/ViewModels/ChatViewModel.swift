@@ -26,6 +26,7 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
     @Published public private(set) var generatingSessionIDs: Set<UUID> = []
     @Published public var connectionStatus: ServerConnectionStatus = .disconnected
     @Published public var inputText: String = ""
+    @Published public var pendingAttachments: [FileAttachment] = []
     @Published public var telemetryLogs: [String] = []
     @Published public var activeAuthURL: URL? = nil
 
@@ -44,6 +45,9 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
     /// FIFO so its foreground tool execution cannot cross-wire separate chats.
     private var queuedTurns: [QueuedTurn] = []
     private var activeTurnQueueID: UUID?
+    /// Session updates are accepted only after the corresponding prompt has been
+    /// sent. `session/load` can replay old transcript events during initialization.
+    private var streamingSessionIDs: Set<UUID> = []
 
     public init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -353,19 +357,62 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
         sessions.firstIndex { $0.serverSessionId == serverSessionID }
     }
 
+    // MARK: - Attachment management
+
+    public func addAttachment(_ attach: FileAttachment) {
+        pendingAttachments.append(attach)
+    }
+
+    public func removeAttachment(_ id: UUID) {
+        pendingAttachments.removeAll { $0.id == id }
+    }
+
+    public func clearAttachments() {
+        pendingAttachments.removeAll()
+    }
+
     // MARK: - Prompting and concurrent turns
+
+    /// Builds the full prompt text by embedding attached file contents before the
+    /// user's message text, with clear file markers so the model understands the context.
+    private func buildPromptText(_ userText: String, _ attachments: [FileAttachment]) -> String {
+        if attachments.isEmpty { return userText }
+
+        var parts: [String] = []
+        for attach in attachments {
+            let fileContent = attach.content
+            if !fileContent.isEmpty {
+                parts.append("--- File: \(attach.fileName) (\(attach.formattedSize)) ---")
+                parts.append(fileContent)
+                parts.append("--- End of \(attach.fileName) ---")
+            } else {
+                parts.append("[Attached file: \(attach.fileName) (\(attach.formattedSize)) - \(attach.filePath)]")
+            }
+        }
+
+        if !userText.isEmpty { parts.append(userText) }
+
+        return parts.joined(separator: "\n\n")
+    }
 
     public func sendCurrentPrompt() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty,
+        guard !text.isEmpty || !pendingAttachments.isEmpty,
               let localID = selectedSessionId,
               !generatingSessionIDs.contains(localID),
               let index = sessions.firstIndex(where: { $0.id == localID }) else { return }
 
+        let attachments = Array(pendingAttachments)
         inputText = ""
-        sessions[index].messages.append(ChatMessage(role: .user, content: text))
+        clearAttachments()
+
+        sessions[index].messages.append(ChatMessage(role: .user, content: text, attachments: attachments))
         if sessions[index].messages.filter({ $0.role == .user }).count == 1 {
-            let title = String(text.prefix(36)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = if !text.isEmpty {
+                String(text.prefix(36)).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                "File: \(attachments.first?.fileName ?? "attachment")"
+            }
             sessions[index].title = title.isEmpty ? "New Chat" : title
         }
         sessions[index].updatedAt = Date()
@@ -379,10 +426,13 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
         ))
         generatingSessionIDs.insert(localID)
 
+        // Build the full prompt text with file contents embedded
+        let fullPrompt = buildPromptText(text, attachments)
+
         let snapshot = sessions[index]
         queuedTurns.append(QueuedTurn(
             sessionID: localID,
-            text: text,
+            text: fullPrompt,
             model: snapshot.modelId,
             effort: snapshot.reasoningEffort
         ))
@@ -416,6 +466,7 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
                   let index = sessions.firstIndex(where: { $0.id == turn.sessionID }),
                   let serverID = sessions[index].serverSessionId else { return }
             serverSessionID = serverID
+            streamingSessionIDs.insert(turn.sessionID)
             try await client.sendPrompt(
                 sessionId: serverID,
                 text: turn.text,
@@ -476,6 +527,7 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
     }
 
     private func finishTurn(localSessionID: UUID, cancelled: Bool, advanceQueue: Bool = true) {
+        streamingSessionIDs.remove(localSessionID)
         guard generatingSessionIDs.remove(localSessionID) != nil,
               let index = sessions.firstIndex(where: { $0.id == localSessionID }),
               let messageIndex = sessions[index].messages.indices.last,
@@ -497,6 +549,8 @@ public final class ChatViewModel: ObservableObject, ACPClientDelegate {
 
     private func activeAssistantIndices(serverSessionID: String) -> (session: Int, message: Int)? {
         guard let sessionIndex = localSessionIndex(serverSessionID: serverSessionID),
+              activeTurnQueueID == sessions[sessionIndex].id,
+              streamingSessionIDs.contains(sessions[sessionIndex].id),
               generatingSessionIDs.contains(sessions[sessionIndex].id),
               let messageIndex = sessions[sessionIndex].messages.indices.last,
               sessions[sessionIndex].messages[messageIndex].role == .assistant else { return nil }

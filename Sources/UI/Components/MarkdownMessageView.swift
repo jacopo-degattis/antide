@@ -71,7 +71,7 @@ public struct MarkdownMessageView: View {
                     .fill(CodexTheme.tertiaryText.opacity(0.7))
                     .frame(width: 2)
                 inlineText(text)
-                    .font(.system(size: 13.5))
+                    .font(.system(size: 14))             // Increased (was 13.5)
                     .foregroundStyle(CodexTheme.secondaryText)
                     .lineSpacing(4)
                     .textSelection(.enabled)
@@ -104,10 +104,10 @@ public struct MarkdownMessageView: View {
 
     private func headingSize(_ level: Int) -> CGFloat {
         switch level {
-        case 1: 21
-        case 2: 18
-        case 3: 16
-        default: 14.5
+        case 1: 23      // Increased (was 21)
+        case 2: 19      // Increased (was 18)
+        case 3: 17      // Increased (was 16)
+        default: 15.5   // Increased (was 14.5)
         }
     }
 }

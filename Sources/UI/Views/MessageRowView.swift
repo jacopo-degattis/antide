@@ -29,16 +29,52 @@ public struct MessageRowView: View {
     private var userMessage: some View {
         HStack {
             Spacer(minLength: 48)
-            Text(message.content)
-                .font(.system(size: 14))
-                .foregroundStyle(CodexTheme.primaryText)
-                .lineSpacing(4)
-                .textSelection(.enabled)
-                .padding(.horizontal, 15)
-                .padding(.vertical, 11)
-                .background(CodexTheme.surfaceHighlight.opacity(0.72), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            VStack(alignment: .leading, spacing: 6) {
+                // Show attached files as chips
+                if !message.attachments.isEmpty {
+                    VStack(spacing: 6) {
+                        ForEach(message.attachments) { attach in
+                            attachmentChip(attach)
+                        }
+                    }
+                }
+
+                if !message.content.isEmpty {
+                    Text(message.content)
+                        .font(.system(size: 15))                                    // Increased (was 14)
+                        .foregroundStyle(CodexTheme.primaryText)
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(.horizontal, 15)
+            .padding(.vertical, 11)
+            .background(CodexTheme.surfaceHighlight.opacity(0.72), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Displays an attached file as a compact chip in the user message bubble.
+    private func attachmentChip(_ attach: FileAttachment) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: attach.iconName)
+                .font(.system(size: 12))
+                .foregroundStyle(CodexTheme.secondaryText)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attach.fileName)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(CodexTheme.primaryText)
+                    .lineLimit(1)
+                Text(attach.formattedSize)
+                    .font(.system(size: 11))
+                    .foregroundStyle(CodexTheme.tertiaryText)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(CodexTheme.surface.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var assistantMessage: some View {

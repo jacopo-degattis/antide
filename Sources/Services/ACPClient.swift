@@ -29,6 +29,14 @@ public final class ACPClient: @unchecked Sendable {
     private var stderrTask: Task<Void, Never>?
     private var activeSessionId: String?
     private var sessionWorkingDirectories: [String: String] = [:]
+    /// ACP adapters may signal turn completion both in the prompt response and
+    /// via `turn_completed`. Track each prompt so the duplicate signal cannot
+    /// finish a following turn in the same session.
+    private struct PromptCompletionState {
+        var responseAccepted: Bool?
+        var receivedTurnCompleted = false
+    }
+    private var promptCompletions: [String: PromptCompletionState] = [:]
 
     public init(transport: any ACPTransport) {
         self.transport = transport
@@ -205,15 +213,36 @@ public final class ACPClient: @unchecked Sendable {
             effort: effort?.rawValue
         )
         let req = JSONRPCRequest(method: "session/prompt", params: promptParams)
-        let response = try await sendRequest(req, timeout: responseTimeout)
-        if let error = response.error { throw error }
-        // ACP session/prompt normally responds once the turn completes. A few
-        // adapters return an explicit `accepted` acknowledgement and stream the
-        // remainder asynchronously; those must be completed by their turn event.
-        let wasOnlyAccepted = response.result?.dictionaryValue?["status"]?.stringValue == "accepted"
-        if !wasOnlyAccepted {
-            delegate?.clientDidCompleteTurn(serverSessionId: sessionId)
+        lock.withLock { promptCompletions[sessionId] = PromptCompletionState() }
+
+        let response: RawInboundMessage
+        do {
+            response = try await sendRequest(req, timeout: responseTimeout)
+        } catch {
+            _ = lock.withLock { promptCompletions.removeValue(forKey: sessionId) }
+            throw error
         }
+        if let error = response.error {
+            _ = lock.withLock { promptCompletions.removeValue(forKey: sessionId) }
+            throw error
+        }
+
+        // ACP session/prompt normally responds once the turn completes. Some
+        // adapters instead acknowledge immediately and signal completion later.
+        // A notification that races ahead of the response is held until we know
+        // which behavior the adapter uses.
+        let wasOnlyAccepted = response.result?.dictionaryValue?["status"]?.stringValue == "accepted"
+        let shouldNotify = lock.withLock { () -> Bool in
+            guard var state = promptCompletions[sessionId] else { return false }
+            state.responseAccepted = wasOnlyAccepted
+            if !wasOnlyAccepted || state.receivedTurnCompleted {
+                promptCompletions.removeValue(forKey: sessionId)
+                return true
+            }
+            promptCompletions[sessionId] = state
+            return false
+        }
+        if shouldNotify { delegate?.clientDidCompleteTurn(serverSessionId: sessionId) }
     }
 
     public func cancelTurn(sessionId: String) async throws {
@@ -582,7 +611,17 @@ public final class ACPClient: @unchecked Sendable {
             )
 
         case "turn_completed", "turn_end":
-            delegate?.clientDidCompleteTurn(serverSessionId: serverSessionId)
+            let shouldNotify = lock.withLock { () -> Bool in
+                guard var state = promptCompletions[serverSessionId] else { return false }
+                state.receivedTurnCompleted = true
+                if state.responseAccepted == true {
+                    promptCompletions.removeValue(forKey: serverSessionId)
+                    return true
+                }
+                promptCompletions[serverSessionId] = state
+                return false
+            }
+            if shouldNotify { delegate?.clientDidCompleteTurn(serverSessionId: serverSessionId) }
 
         default:
             if let chunk = textValue(dict["content"]) {

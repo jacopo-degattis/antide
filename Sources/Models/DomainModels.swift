@@ -262,6 +262,60 @@ public struct PendingACPApproval: Codable, Sendable, Equatable, Identifiable {
     public var id: String { requestId }
 }
 
+// MARK: - File Attachment
+
+public struct FileAttachment: Identifiable, Codable, Sendable, Equatable {
+    public let id: UUID
+    public let fileName: String
+    public let filePath: String
+    public let mimeType: String
+    public let sizeBytes: Int
+    /// Text content of the file (for text-based file types)
+    public let content: String
+
+    public init(
+        id: UUID = UUID(),
+        fileName: String,
+        filePath: String = "",
+        mimeType: String = "application/octet-stream",
+        sizeBytes: Int = 0,
+        content: String = ""
+    ) {
+        self.id = id
+        self.fileName = fileName
+        self.filePath = filePath
+        self.mimeType = mimeType
+        self.sizeBytes = sizeBytes
+        self.content = content
+    }
+
+    public var formattedSize: String {
+        if sizeBytes < 1024 {
+            return "\(sizeBytes) B"
+        } else if sizeBytes < 1024 * 1024 {
+            let kb = Double(sizeBytes) / 1024.0
+            return "\(String(format: "%.1f", kb)) KB"
+        } else {
+            let mb = Double(sizeBytes) / (1024.0 * 1024.0)
+            return "\(String(format: "%.1f", mb)) MB"
+        }
+    }
+
+    public var iconName: String {
+        if mimeType.hasPrefix("image/") {
+            return "photo"
+        } else if mimeType.hasPrefix("text/") || fileName.hasSuffix(".md") || fileName.hasSuffix(".swift") || fileName.hasSuffix(".py") || fileName.hasSuffix(".js") || fileName.hasSuffix(".ts") || fileName.hasSuffix(".json") {
+            return "doc.text"
+        } else if mimeType.hasPrefix("application/pdf") {
+            return "doc.pdf"
+        } else if mimeType.hasPrefix("application/zip") || mimeType.hasPrefix("application/x-tar") || mimeType.hasPrefix("application/gzip") {
+            return "folder.zip"
+        } else {
+            return "doc"
+        }
+    }
+}
+
 // MARK: - Chat Message
 
 public enum MessageRole: String, Codable, Sendable {
@@ -275,6 +329,7 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
     public let role: MessageRole
     public let timestamp: Date
     public var content: String
+    public var attachments: [FileAttachment]
     public var thinkingState: ThinkingState?
     public var toolCalls: [ToolCallItem]
     public var planSteps: [PlanStepItem]
@@ -286,6 +341,7 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
         role: MessageRole,
         timestamp: Date = Date(),
         content: String = "",
+        attachments: [FileAttachment] = [],
         thinkingState: ThinkingState? = nil,
         toolCalls: [ToolCallItem] = [],
         planSteps: [PlanStepItem] = [],
@@ -296,6 +352,7 @@ public struct ChatMessage: Identifiable, Codable, Sendable, Equatable {
         self.role = role
         self.timestamp = timestamp
         self.content = content
+        self.attachments = attachments
         self.thinkingState = thinkingState
         self.toolCalls = toolCalls
         self.planSteps = planSteps

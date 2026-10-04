@@ -15,7 +15,7 @@ Heavily inspired by the **Codex** application UI, it provides a dark slate aesth
   - **Live Thinking Drawer:** Animated shimmering gradient (`sparkles`), real-time execution timer, token usage metrics, and expandable raw thought reasoning traces.
   - **Structured Plan Timeline:** Multi-step checklist with status indicators (completed, running, pending, failed) connected by a vertical timeline.
   - **Collapsible Tool Call Cards:** Visual cards for bash commands (`agy`, `git`, `npm`), file edits, and codebase searches, displaying arguments, stdout/stderr blocks, syntax highlighting, and execution timing (`ms`).
-  - **Flexible Input Bar:** Multiline text input with workspace selection, always-on YOLO execution (automatically accepting tool and command permissions), persistent model and reasoning-effort selectors, and instant turn cancellation (`Stop`).
+  - **Flexible Input Bar:** Multiline text input with file attachments via the picker or drag-and-drop, workspace selection, always-on YOLO execution (automatically accepting tool and command permissions), persistent model and reasoning-effort selectors, and instant turn cancellation (`Stop`).
 
 - **Flexible Connection Architecture:**
   - **Local Subprocess (Stdio):** Direct asynchronous NDJSON line streaming with `Foundation.Process`, auto-injecting proper `PATH` discovery (`node`, `pnpm`, `agy`), and handling SIGTERM/SIGKILL lifecycle cleanup.

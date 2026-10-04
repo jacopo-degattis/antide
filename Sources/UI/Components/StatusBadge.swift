@@ -14,13 +14,13 @@ public struct StatusBadge: View {
             dotView
 
             Text(statusTitle)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(.system(size: 12.5, weight: .medium))       // Increased (was 11.5)
                 .foregroundColor(statusTextColor)
 
             if case .error = status {
                 Button(action: onReconnect) {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))                // Increased (was 10)
                         .foregroundColor(CodexTheme.accentAmber)
                 }
                 .buttonStyle(.plain)

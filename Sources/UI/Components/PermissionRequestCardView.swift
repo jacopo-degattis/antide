@@ -13,17 +13,17 @@ public struct PermissionRequestCardView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "hand.raised.fill")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))         // Increased (was 13)
                     .foregroundStyle(CodexTheme.accentAmber)
                     .frame(width: 29, height: 29)
                     .background(CodexTheme.accentAmber.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Approval required")
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(.system(size: 13.5, weight: .semibold))       // Increased (was 12.5)
                         .foregroundStyle(CodexTheme.primaryText)
                     Text(request.title)
-                        .font(.system(size: 12))
+                        .font(.system(size: 13))                           // Increased (was 12)
                         .foregroundStyle(CodexTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -32,7 +32,7 @@ public struct PermissionRequestCardView: View {
 
             if request.options.isEmpty {
                 Text("The agent is waiting for an approval choice, but the server did not provide any options. Check the ACP server logs.")
-                    .font(.system(size: 11.5))
+                    .font(.system(size: 12.5))                           // Increased (was 11.5)
                     .foregroundStyle(CodexTheme.accentAmber)
             } else {
                 HStack(spacing: 8) {
@@ -41,7 +41,7 @@ public struct PermissionRequestCardView: View {
                             onSelect(option.optionId)
                         } label: {
                             Text(option.name)
-                                .font(.system(size: 11.5, weight: .medium))
+                                .font(.system(size: 12.5, weight: .medium))       // Increased (was 11.5)
                                 .frame(minWidth: 68)
                         }
                         .buttonStyle(.bordered)

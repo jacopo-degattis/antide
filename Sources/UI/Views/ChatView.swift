@@ -73,18 +73,18 @@ public struct ChatView: View {
     private func conversationHeader(_ session: ChatSession) -> some View {
         HStack(spacing: 9) {
             Text(session.title)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 14, weight: .medium))            // Increased (was 13)
                 .foregroundStyle(CodexTheme.primaryText)
                 .lineLimit(1)
 
             Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold))           // Increased (was 8)
                 .foregroundStyle(CodexTheme.tertiaryText)
 
             Spacer()
 
             Text(session.workspacePath.isEmpty ? "General chat" : URL(fileURLWithPath: session.workspacePath).lastPathComponent)
-                .font(.system(size: 11.5))
+                .font(.system(size: 12.5))                           // Increased (was 11.5)
                 .foregroundStyle(CodexTheme.secondaryText)
                 .lineLimit(1)
 
@@ -131,7 +131,7 @@ public struct ChatView: View {
                         .foregroundStyle(CodexTheme.primaryText)
                 }
             }
-            .font(.system(size: 25, weight: .regular))
+            .font(.system(size: 26, weight: .regular))            // Increased (was 25)
             .multilineTextAlignment(.center)
         }
         .padding(.horizontal, 24)
@@ -145,10 +145,10 @@ public struct ChatView: View {
                 .foregroundStyle(CodexTheme.accentAmber)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Sign in to Antigravity")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))     // Increased (was 12)
                     .foregroundStyle(CodexTheme.primaryText)
                 Text("The ACP server requires Google account authentication.")
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))                         // Increased (was 11)
                     .foregroundStyle(CodexTheme.secondaryText)
             }
             Spacer()
@@ -173,7 +173,7 @@ public struct ChatView: View {
             Image(systemName: "exclamationmark.circle")
                 .foregroundStyle(CodexTheme.accentAmber)
             Text(message)
-                .font(.system(size: 11.5))
+                .font(.system(size: 12.5))                           // Increased (was 11.5)
                 .foregroundStyle(CodexTheme.secondaryText)
                 .lineLimit(2)
             Spacer(minLength: 4)
